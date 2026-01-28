@@ -11,7 +11,7 @@ export function PoliticoCard({ politico }: { politico: Politico }) {
         <div className="grow">
           <div className="card-title">{politico.name}</div>
           <div className="muted line-clamp-2">
-            {politico.description ?? ([politico.cidade, politico.estado].filter(Boolean).join(' • ') || '—')}
+            {politico.funcao ?? ([politico.cidade, politico.estado].filter(Boolean).join(' • ') || '—')}
           </div>
           <div className="meta">
             {politico.instagram_username ? <span className="pill">Instagram: @{politico.instagram_username}</span> : null}

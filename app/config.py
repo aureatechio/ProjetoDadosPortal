@@ -38,9 +38,13 @@ class Settings(BaseSettings):
     delay_entre_requisicoes: float = 2.0
     delay_instagram: float = 5.0
     
+    # Apify (para coleta de redes sociais)
+    apify_token: Optional[str] = None
+    
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+        extra = "ignore"  # Ignora campos extras no .env
 
 
 # Instância global de configurações

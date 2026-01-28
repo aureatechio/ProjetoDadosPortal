@@ -99,7 +99,7 @@ export function PoliticoMencoesPage() {
                 <span className="pill">{rows.length} menções</span>
               </div>
               {rows.map((m) => (
-                <SocialMentionCard key={m.id} m={m} />
+                <SocialMentionCard key={m.id} mention={m} />
               ))}
             </div>
           ))

@@ -224,9 +224,21 @@ class Apify:
     def close(self) -> None:
         self.http.close()
 
-    def run_sync_items(self, actor_id: str, actor_input: Dict[str, Any], *, limit: int) -> List[Dict[str, Any]]:
+    def run_sync_items(
+        self,
+        actor_id: str,
+        actor_input: Dict[str, Any],
+        *,
+        limit: int,
+        timeout_s: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
         url = f"https://api.apify.com/v2/acts/{actor_id}/run-sync-get-dataset-items"
-        r = self.http.post(url, params={"token": self.token, "format": "json", "limit": str(limit)}, json=actor_input)
+        r = self.http.post(
+            url,
+            params={"token": self.token, "format": "json", "limit": str(limit)},
+            json=actor_input,
+            timeout=timeout_s,
+        )
         r.raise_for_status()
         data = r.json()
         if isinstance(data, list):
@@ -293,6 +305,13 @@ def main() -> None:
     parser.add_argument("--ig-search-limit", type=int, default=15, help="Máximo de candidatos do Instagram Search.")
     parser.add_argument("--ig-posts-fetch", type=int, default=30, help="Quantos posts buscar do perfil para rankear.")
     parser.add_argument("--top-posts", type=int, default=3, help="Quantos posts mais engajados gravar.")
+    parser.add_argument("--posts-timeout", type=float, default=70.0, help="Timeout (s) para scraping de posts por perfil.")
+    parser.add_argument(
+        "--only-ids",
+        type=str,
+        default=None,
+        help="Opcional: processa apenas esses IDs (ex: 15,16,86).",
+    )
     parser.add_argument(
         "--skip-posts-if-exists",
         action="store_true",
@@ -331,6 +350,9 @@ def main() -> None:
         .data
         or []
     )
+    if args.only_ids:
+        wanted = {int(x.strip()) for x in args.only_ids.split(",") if x.strip().isdigit()}
+        politicos = [p for p in politicos if int(p.get("id") or 0) in wanted]
 
     updated_politicos = 0
     upserted_posts = 0
@@ -382,7 +404,12 @@ def main() -> None:
                         "searchType": "user",
                         "searchLimit": int(args.ig_search_limit),
                     }
-                    ig_candidates = apify.run_sync_items(IG_SEARCH_ACTOR, search_input, limit=int(args.ig_search_limit))
+                    ig_candidates = apify.run_sync_items(
+                        IG_SEARCH_ACTOR,
+                        search_input,
+                        limit=int(args.ig_search_limit),
+                        timeout_s=90.0,
+                    )
                     best_item, best_score, best_meta = pick_best_ig(name, ig_candidates)
 
                 chosen_ig = p.get("instagram_username")
@@ -455,6 +482,73 @@ def main() -> None:
                         except Exception:
                             pass
 
+                        # Se não tem posts suficientes, mas outro político com o mesmo instagram_username já tem,
+                        # copia os TOP posts (evita custo/timeout no Apify).
+                        try:
+                            siblings = (
+                                supabase.table("politico")
+                                .select("uuid")
+                                .eq("instagram_username", ig_user)
+                                .neq("uuid", puuid)
+                                .limit(5)
+                                .execute()
+                                .data
+                                or []
+                            )
+                            for s in siblings:
+                                ouuid = s.get("uuid")
+                                if not ouuid:
+                                    continue
+                                src_posts = (
+                                    supabase.table("social_media_posts")
+                                    .select("*")
+                                    .eq("politico_id", ouuid)
+                                    .eq("plataforma", "instagram")
+                                    .order("engagement_score", desc=True)
+                                    .limit(int(args.top_posts))
+                                    .execute()
+                                    .data
+                                    or []
+                                )
+                                if len(src_posts) >= int(args.top_posts):
+                                    if args.apply:
+                                        for sp in src_posts:
+                                            sp2 = dict(sp)
+                                            sp2.pop("id", None)  # deixa o UUID ser gerado
+                                            sp2["politico_id"] = puuid
+                                            md = sp2.get("metadata") if isinstance(sp2.get("metadata"), dict) else {}
+                                            md = dict(md)
+                                            md["copied_from_politico_uuid"] = ouuid
+                                            sp2["metadata"] = md
+                                            supabase.table("social_media_posts").upsert(
+                                                sp2, on_conflict="politico_id,plataforma,post_id"
+                                            ).execute()
+                                            upserted_posts += 1
+                                    audit_row = {
+                                        "ts": datetime.now(timezone.utc).isoformat(),
+                                        "apply": bool(args.apply),
+                                        "politico_id": pid,
+                                        "politico_uuid": puuid,
+                                        "politico_name": name,
+                                        "missing": {"instagram": missing_ig, "twitter": missing_tw, "image": missing_img},
+                                        "ig_search": {"score": best_score, "meta": best_meta},
+                                        "chosen": {"instagram_username": chosen_ig, "twitter_username": chosen_tw, "image": chosen_img},
+                                        "did_update_politico": did_update,
+                                        "top_posts_count": len(src_posts),
+                                        "top_posts": [{"post_id": r.get("post_id"), "engagement_score": r.get("engagement_score")} for r in src_posts],
+                                        "posts_copied": True,
+                                        "posts_copied_from": ouuid,
+                                    }
+                                    with audit_path.open("a", encoding="utf-8") as f:
+                                        f.write(json.dumps(audit_row, ensure_ascii=False) + "\n")
+                                    time.sleep(float(args.sleep))
+                                    # pula scraping
+                                    raise StopIteration
+                        except StopIteration:
+                            continue
+                        except Exception:
+                            pass
+
                     profile_url = f"https://www.instagram.com/{ig_user}"
                     posts_input = {
                         "directUrls": [profile_url],
@@ -462,7 +556,15 @@ def main() -> None:
                         "resultsLimit": int(args.ig_posts_fetch),
                         "addParentData": True,
                     }
-                    raw_posts = apify.run_sync_items(IG_SCRAPER_ACTOR, posts_input, limit=int(args.ig_posts_fetch))
+                    try:
+                        raw_posts = apify.run_sync_items(
+                            IG_SCRAPER_ACTOR,
+                            posts_input,
+                            limit=int(args.ig_posts_fetch),
+                            timeout_s=float(args.posts_timeout),
+                        )
+                    except httpx.TimeoutException:
+                        raw_posts = []
                     norm = [normalize_post(r) for r in raw_posts]
                     norm = [r for r in norm if r.get("post_id") and (r.get("post_url") or r.get("conteudo"))]
                     norm.sort(key=lambda r: float(r.get("engagement_score") or 0), reverse=True)
@@ -490,7 +592,9 @@ def main() -> None:
                                     "instagram_username": ig_user,
                                 },
                             }
-                            supabase.table("social_media_posts").upsert(row, on_conflict="plataforma,post_id").execute()
+                            supabase.table("social_media_posts").upsert(
+                                row, on_conflict="politico_id,plataforma,post_id"
+                            ).execute()
                             upserted_posts += 1
 
                 audit_row = {

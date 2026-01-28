@@ -73,6 +73,38 @@ Para gravar no Supabase (cuidado: faz update):
 python scripts/fill_socials_from_apify.py --limit 100 --apply
 ```
 
+### Script: coletar menções do Twitter/X via Apify
+
+Coleta menções do Twitter/X sobre políticos com `usar_diretoriaja = TRUE`. Busca tweets que mencionam o nome do político ou seu @username.
+
+```bash
+# Dry-run (apenas simula, não grava)
+python scripts/collect_twitter_mentions_apify.py
+
+# Grava no Supabase
+python scripts/collect_twitter_mentions_apify.py --apply
+
+# Opções disponíveis:
+python scripts/collect_twitter_mentions_apify.py --apply \
+    --limit-politicos 10 \
+    --limit-tweets 50 \
+    --search-mode latest \
+    --days-back 7 \
+    --min-engagement 10
+
+# Processar apenas IDs específicos
+python scripts/collect_twitter_mentions_apify.py --apply --only-ids 15,16,17
+```
+
+Parâmetros:
+- `--apply`: Grava no Supabase (sem isso, apenas simula)
+- `--limit-politicos`: Máximo de políticos a processar (default: 50)
+- `--limit-tweets`: Máximo de tweets por político (default: 50)
+- `--search-mode`: `top` (mais relevantes) ou `latest` (mais recentes)
+- `--days-back`: Quantos dias para trás buscar (default: 7)
+- `--min-engagement`: Engajamento mínimo para salvar (default: 0)
+- `--skip-if-recent`: Pula político se já tiver N menções nas últimas 24h
+
 ### 3. Execute a aplicação
 
 ```bash
@@ -180,13 +212,39 @@ Configuração da URL da API via `VITE_API_URL` (veja `frontend/env.example`).
 
 ## Tabelas do Banco de Dados
 
-- `politico` - Políticos cadastrados (com instagram_username, cidade, estado)
+- `politico` - Políticos cadastrados (com instagram_username, twitter_username, usar_diretoriaja, cidade, estado)
 - `politico_concorrentes` - Relacionamento de concorrentes
 - `instagram_posts` - Posts do Instagram com engajamento
+- `social_media_posts` - Posts das redes sociais do próprio político (Instagram, Twitter)
+- `social_mentions` - Menções aos políticos em redes sociais (Twitter/X, Bluesky, Google Trends)
+- `concorrente_twitter_insights` - Snapshot diário de Twitter/X para concorrentes (seguidores + top 3 menções)
 - `noticias` - Notícias com scores de relevância
 - `fontes_noticias` - Fontes com pesos de confiabilidade
 - `portal_trending_topics` - Trending topics políticos
 - `coleta_logs` - Logs de execução das coletas
+
+## Rotina: insights de Twitter/X para concorrentes
+
+1) Crie a tabela no Supabase usando:
+
+- `scripts/sql/create_concorrente_twitter_insights.sql`
+
+2) Rode o coletor (dry-run / aplicar):
+
+```bash
+python scripts/collect_concorrentes_twitter_insights.py
+python scripts/collect_concorrentes_twitter_insights.py --apply
+```
+
+3) Rotina pronta (wrapper):
+
+```bash
+python scripts/routine_concorrentes_twitter_insights.py
+```
+
+4) Endpoint da API (para consumo no frontend):
+
+- `GET /politicos/{id}/concorrentes/twitter_insights?days_back=7`
 
 ## Limites de API
 

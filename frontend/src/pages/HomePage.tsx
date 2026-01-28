@@ -28,7 +28,7 @@ export function HomePage() {
         portalApi.getTrending('google'),
         portalApi.getNoticiasPolitica(),
       ])
-      setPoliticos(p.filter((x) => x.usar_diretoriaja === true))
+      setPoliticos(p)
       setTrendingPolitica(tp)
       setTrendingTwitter(tt)
       setTrendingGoogle(tg)

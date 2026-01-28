@@ -8,6 +8,10 @@ from typing import Optional, List
 
 from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+import httpx
+from io import BytesIO
+import base64
 
 from app import __version__
 from app.config import settings
@@ -107,7 +111,8 @@ async def health():
 async def get_noticias_politico(
     politico_id: int,
     limit: int = Query(default=20, ge=1, le=100),
-    min_score: float = Query(default=0, ge=0, le=100)
+    min_score: float = Query(default=0, ge=0, le=100),
+    diversificar: bool = Query(default=True, description="Diversificar notícias por fonte/canal")
 ):
     """
     Retorna notícias de um político ordenadas por relevância.
@@ -115,8 +120,9 @@ async def get_noticias_politico(
     - **politico_id**: ID do político
     - **limit**: Número máximo de notícias (padrão: 20)
     - **min_score**: Score mínimo de relevância (padrão: 0)
+    - **diversificar**: Se true, diversifica as notícias por fonte/canal (padrão: true)
     """
-    noticias = db.get_noticias_politico(politico_id, limit, min_score)
+    noticias = db.get_noticias_politico(politico_id, limit, min_score, diversificar_fontes=diversificar)
     return noticias
 
 
@@ -153,13 +159,74 @@ async def get_noticias_concorrentes(
     
     todas_noticias = []
     for concorrente in concorrentes:
-        noticias = db.get_noticias_politico(concorrente["id"], limit)
+        noticias = db.get_noticias_politico(concorrente["id"], limit, diversificar_fontes=True)
         todas_noticias.extend(noticias)
     
     # Ordena por relevância
     todas_noticias.sort(key=lambda x: x.get("relevancia_total", 0), reverse=True)
     
     return todas_noticias[:limit * len(concorrentes)]
+
+
+@app.get("/politicos/{politico_id}/concorrentes/resumo", response_model=List[dict])
+async def get_resumo_concorrentes(
+    politico_id: int,
+    limit_noticias: int = Query(default=5, ge=1, le=20)
+):
+    """
+    Retorna resumo completo dos concorrentes de um político, incluindo
+    dados básicos e notícias diversificadas de cada um.
+    
+    - **politico_id**: ID do político
+    - **limit_noticias**: Número máximo de notícias por concorrente (padrão: 5)
+    """
+    concorrentes = db.get_concorrentes(politico_id)
+    
+    if not concorrentes:
+        return []
+    
+    resultado = []
+    for concorrente in concorrentes:
+        concorrente_id = concorrente["id"]
+        
+        # Busca notícias diversificadas do concorrente
+        noticias = db.get_noticias_politico(
+            concorrente_id, 
+            limit=limit_noticias, 
+            min_score=0,
+            diversificar_fontes=True
+        )
+        
+        # Busca posts do Instagram (tabela unificada primeiro, fallback para legada)
+        instagram = db.get_social_media_posts(concorrente_id, "instagram", limit=3)
+        if not instagram:
+            instagram = db.get_instagram_posts(concorrente_id, limit=3)
+        
+        # Monta resumo do concorrente
+        resumo_concorrente = {
+            "politico": concorrente,
+            "noticias": noticias,
+            "total_noticias": db.count_noticias_politico(concorrente_id),
+            "instagram": instagram,
+            "total_instagram": db.count_instagram_posts(concorrente_id),
+        }
+        
+        resultado.append(resumo_concorrente)
+    
+    return resultado
+
+
+@app.get("/politicos/{politico_id}/concorrentes/twitter_insights", response_model=List[dict])
+async def get_concorrentes_twitter_insights(
+    politico_id: int,
+    days_back: int = Query(default=7, ge=1, le=30),
+):
+    """
+    Retorna insights de Twitter/X para os concorrentes de um político:
+    - followers_count (snapshot mais recente em `concorrente_twitter_insights`)
+    - top 3 menções mais engajadas no Twitter/X (via snapshot; fallback em `social_mentions`)
+    """
+    return db.get_concorrentes_twitter_insights(politico_id, days_back=days_back)
 
 
 @app.get("/noticias/cidade/{cidade}", response_model=List[dict])
@@ -199,6 +266,38 @@ async def get_noticias_estado(
     """
     noticias = db.get_noticias_estado(estado.upper(), limit=limit)
     return noticias
+
+
+@app.get("/noticias/capital/{estado}", response_model=List[dict])
+async def get_noticias_capital(
+    estado: str,
+    limit: int = Query(default=3, ge=1, le=20)
+):
+    """
+    Retorna notícias da capital de um estado ordenadas por relevância.
+    
+    - **estado**: Sigla do estado (ex: SP, RJ)
+    - **limit**: Número máximo de notícias (padrão: 3)
+    """
+    noticias = db.get_noticias_capital(estado.upper(), limit=limit)
+    return noticias
+
+
+@app.get("/noticias/capitais", response_model=dict)
+async def get_noticias_todas_capitais(
+    limit_por_capital: int = Query(default=3, ge=1, le=10)
+):
+    """
+    Retorna notícias de todas as capitais agrupadas por estado.
+    
+    - **limit_por_capital**: Número máximo de notícias por capital (padrão: 3)
+    """
+    noticias = db.get_noticias_todas_capitais(limit_por_capital)
+    return {
+        "noticias_por_estado": noticias,
+        "estados_com_noticias": list(noticias.keys()),
+        "total_estados": len(noticias)
+    }
 
 
 @app.get("/noticias/{noticia_id}/analise", response_model=dict)
@@ -487,9 +586,9 @@ async def get_jobs_agendados():
 @app.get("/politicos", response_model=List[dict])
 async def get_politicos():
     """
-    Retorna todos os políticos ativos.
+    Retorna apenas políticos com usar_diretoriaja = true.
     """
-    politicos = db.get_politicos_ativos()
+    politicos = db.get_politicos_diretoriaja()
     return politicos
 
 
@@ -533,13 +632,26 @@ async def get_politico_resumo(politico_id: int):
     
     # Coleta todos os dados
     noticias = db.get_noticias_politico(politico_id, limit=5, min_score=30)
-    instagram = db.get_instagram_posts(politico_id, limit=5)
+    # Instagram: tabela unificada primeiro (compatível com endpoint /instagram)
+    instagram = db.get_social_media_posts(politico_id, "instagram", limit=5)
+    if not instagram:
+        instagram = db.get_instagram_posts(politico_id, limit=5)
     concorrentes = db.get_concorrentes(politico_id)
     
-    # Notícias da cidade
+    # Notícias da cidade do político (tipo='cidade' - busca genérica por nome da cidade)
     noticias_cidade = []
     if politico.get("cidade"):
         noticias_cidade = db.get_noticias_cidade(politico["cidade"], limit=5)
+    
+    # Notícias a nível de ESTADO (tipo='estado' sem cidade - governo, assembleia)
+    noticias_estado = []
+    if politico.get("estado"):
+        noticias_estado = db.get_noticias_nivel_estado(politico["estado"], limit=3)
+    
+    # Notícias a nível de CIDADE/CAPITAL (tipo='cidade' com cidade preenchida - prefeitura, câmara)
+    noticias_capital = []
+    if politico.get("estado"):
+        noticias_capital = db.get_noticias_capital(politico["estado"], limit=3)
     
     return {
         "politico": politico,
@@ -547,8 +659,11 @@ async def get_politico_resumo(politico_id: int):
         "top_instagram": instagram,
         "concorrentes": concorrentes,
         "noticias_cidade": noticias_cidade,
-        "total_noticias": len(db.get_noticias_politico(politico_id, limit=1000)),
-        "total_posts_instagram": len(db.get_instagram_posts(politico_id, limit=1000))
+        "noticias_estado": noticias_estado,
+        "noticias_capital": noticias_capital,
+        "total_noticias": db.count_noticias_politico(politico_id),
+        "total_posts_instagram": db.count_instagram_posts(politico_id),
+        "total_mencoes": db.count_social_mentions_politico(politico_id),
     }
 
 
@@ -571,7 +686,12 @@ async def get_processos_politico(
     - **status**: Filtro por status
     - **limit**: Número máximo de resultados
     """
-    query = db.client.table("processos_judiciais").select("*").eq("politico_id", politico_id)
+    # Converte ID inteiro para UUID
+    politico_uuid = db.get_politico_uuid(politico_id)
+    if not politico_uuid:
+        raise HTTPException(status_code=404, detail="Político não encontrado")
+    
+    query = db.client.table("processos_judiciais").select("*").eq("politico_id", politico_uuid)
     
     if tribunal:
         query = query.eq("tribunal", tribunal.upper())
@@ -660,7 +780,12 @@ async def get_filiacoes_politico(politico_id: int):
     
     - **politico_id**: ID do político
     """
-    result = db.client.table("filiacoes_partidarias").select("*").eq("politico_id", politico_id).order("data_filiacao", desc=True).execute()
+    # Converte ID inteiro para UUID
+    politico_uuid = db.get_politico_uuid(politico_id)
+    if not politico_uuid:
+        raise HTTPException(status_code=404, detail="Político não encontrado")
+    
+    result = db.client.table("filiacoes_partidarias").select("*").eq("politico_id", politico_uuid).order("data_filiacao", desc=True).execute()
     filiacoes = result.data if result.data else []
     
     # Lista de partidos
@@ -684,7 +809,12 @@ async def get_candidaturas_politico(
     - **politico_id**: ID do político
     - **eleicao**: Filtrar por eleição
     """
-    query = db.client.table("candidaturas").select("*").eq("politico_id", politico_id)
+    # Converte ID inteiro para UUID
+    politico_uuid = db.get_politico_uuid(politico_id)
+    if not politico_uuid:
+        raise HTTPException(status_code=404, detail="Político não encontrado")
+    
+    query = db.client.table("candidaturas").select("*").eq("politico_id", politico_uuid)
     
     if eleicao:
         query = query.eq("eleicao", eleicao)
@@ -845,11 +975,15 @@ async def get_resumo_processual(politico_id: int):
         raise HTTPException(status_code=404, detail="Político não encontrado")
     
     cpf = politico.get("cpf")
+    politico_uuid = politico.get("uuid")  # Obtém o UUID do político
     
-    # Busca processos
-    processos_result = db.client.table("processos_judiciais").select("*").eq("politico_id", politico_id).execute()
-    processos = processos_result.data if processos_result.data else []
-    processos_ativos = [p for p in processos if p.get("status") == "ativo"]
+    # Busca processos usando UUID
+    processos = []
+    processos_ativos = []
+    if politico_uuid:
+        processos_result = db.client.table("processos_judiciais").select("*").eq("politico_id", politico_uuid).execute()
+        processos = processos_result.data if processos_result.data else []
+        processos_ativos = [p for p in processos if p.get("status") == "ativo"]
     
     # Busca doações feitas
     doacoes_feitas = []
@@ -863,19 +997,26 @@ async def get_resumo_processual(politico_id: int):
         doacoes_recebidas_result = db.client.table("doacoes_eleitorais").select("*").eq("cpf_candidato", cpf).execute()
         doacoes_recebidas = doacoes_recebidas_result.data if doacoes_recebidas_result.data else []
     
-    # Busca candidaturas
-    candidaturas_result = db.client.table("candidaturas").select("*").eq("politico_id", politico_id).execute()
-    candidaturas = candidaturas_result.data if candidaturas_result.data else []
-    eleicoes_vencidas = [c for c in candidaturas if c.get("situacao_totalizacao") and "eleito" in c.get("situacao_totalizacao", "").lower()]
+    # Busca candidaturas usando UUID
+    candidaturas = []
+    eleicoes_vencidas = []
+    if politico_uuid:
+        candidaturas_result = db.client.table("candidaturas").select("*").eq("politico_id", politico_uuid).execute()
+        candidaturas = candidaturas_result.data if candidaturas_result.data else []
+        eleicoes_vencidas = [c for c in candidaturas if c.get("situacao_totalizacao") and "eleito" in c.get("situacao_totalizacao", "").lower()]
     
-    # Busca filiações
-    filiacoes_result = db.client.table("filiacoes_partidarias").select("sigla_partido").eq("politico_id", politico_id).execute()
-    filiacoes = filiacoes_result.data if filiacoes_result.data else []
-    partidos = list(set(f.get("sigla_partido") for f in filiacoes if f.get("sigla_partido")))
+    # Busca filiações usando UUID
+    partidos = []
+    if politico_uuid:
+        filiacoes_result = db.client.table("filiacoes_partidarias").select("sigla_partido").eq("politico_id", politico_uuid).execute()
+        filiacoes = filiacoes_result.data if filiacoes_result.data else []
+        partidos = list(set(f.get("sigla_partido") for f in filiacoes if f.get("sigla_partido")))
     
-    # Busca última consulta
-    logs_result = db.client.table("consulta_processual_logs").select("iniciado_em").eq("politico_id", politico_id).order("iniciado_em", desc=True).limit(1).execute()
-    ultima_consulta = logs_result.data[0]["iniciado_em"] if logs_result.data else None
+    # Busca última consulta usando UUID
+    ultima_consulta = None
+    if politico_uuid:
+        logs_result = db.client.table("consulta_processual_logs").select("iniciado_em").eq("politico_id", politico_uuid).order("iniciado_em", desc=True).limit(1).execute()
+        ultima_consulta = logs_result.data[0]["iniciado_em"] if logs_result.data else None
     
     return {
         "politico_id": politico_id,
@@ -910,7 +1051,12 @@ async def get_logs_consulta_processual(
     query = db.client.table("consulta_processual_logs").select("*")
     
     if politico_id:
-        query = query.eq("politico_id", politico_id)
+        # Converte ID inteiro para UUID
+        politico_uuid = db.get_politico_uuid(politico_id)
+        if politico_uuid:
+            query = query.eq("politico_id", politico_uuid)
+        else:
+            return []  # Político não encontrado
     if fonte:
         query = query.eq("fonte", fonte)
     
@@ -941,6 +1087,61 @@ async def atualizar_cpf_politico(
         return {"status": "ok", "mensagem": "CPF atualizado com sucesso"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao atualizar CPF: {e}")
+
+
+# ==================== PROXY DE IMAGENS ====================
+
+@app.get("/proxy/image")
+async def proxy_image(url: str = Query(..., description="URL da imagem a ser carregada")):
+    """
+    Proxy para carregar imagens de CDNs externos (Instagram, etc.)
+    Contorna proteção de hotlinking retornando a imagem diretamente.
+    """
+    if not url:
+        raise HTTPException(status_code=400, detail="URL é obrigatória")
+    
+    # Valida se é uma URL de imagem permitida
+    allowed_domains = [
+        "cdninstagram.com",
+        "fbcdn.net",
+        "instagram.com",
+        "scontent",
+    ]
+    
+    is_allowed = any(domain in url for domain in allowed_domains)
+    if not is_allowed:
+        raise HTTPException(status_code=403, detail="Domínio não permitido")
+    
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Referer": "https://www.instagram.com/",
+                },
+                follow_redirects=True
+            )
+            
+            if response.status_code != 200:
+                raise HTTPException(status_code=response.status_code, detail="Falha ao carregar imagem")
+            
+            content_type = response.headers.get("content-type", "image/jpeg")
+            
+            return StreamingResponse(
+                BytesIO(response.content),
+                media_type=content_type,
+                headers={
+                    "Cache-Control": "public, max-age=86400",
+                    "Access-Control-Allow-Origin": "*"
+                }
+            )
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Timeout ao carregar imagem")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao carregar imagem: {str(e)}")
 
 
 if __name__ == "__main__":

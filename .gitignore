@@ -62,3 +62,6 @@ out/
 
 # Supabase
 .supabase/
+
+# Playwright MCP screenshots
+.playwright-mcp/

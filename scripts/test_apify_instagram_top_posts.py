@@ -219,9 +219,9 @@ def summarize_comments_ai(
     return (resp.output_text or "").strip()
 
 
-def to_social_media_post(politico_id: int, p: Dict[str, Any], *, actor_id: str) -> Dict[str, Any]:
+def to_social_media_post(politico_uuid: str, p: Dict[str, Any], *, actor_id: str) -> Dict[str, Any]:
     return {
-        "politico_id": politico_id,
+        "politico_id": politico_uuid,
         "plataforma": "instagram",
         "post_id": p.get("post_shortcode"),
         "post_url": p.get("post_url"),
@@ -294,16 +294,27 @@ def main() -> None:
     supabase = create_client(supabase_url, supabase_key) if args.apply else None
 
     # busca username no supabase (a menos que venha por CLI)
-    pol: Dict[str, Any] = {"id": args.politico_id, "name": args.politico_name, "instagram_username": args.instagram_username}
+    pol: Dict[str, Any] = {"id": args.politico_id, "name": args.politico_name, "instagram_username": args.instagram_username, "uuid": None}
     ig_user = (args.instagram_username or "").strip()
     if not ig_user:
         if not supabase_url or not supabase_key:
             raise SystemExit("Para ler o político, defina SUPABASE_URL e SUPABASE_KEY (ou passe --instagram-username).")
         supa_ro = create_client(supabase_url, supabase_key)
-        pol = supa_ro.table("politico").select("id,name,instagram_username").eq("id", args.politico_id).single().execute().data
+        pol = supa_ro.table("politico").select("id,uuid,name,instagram_username").eq("id", args.politico_id).single().execute().data
         ig_user = (pol.get("instagram_username") or "").strip()
     if not ig_user:
         raise SystemExit(f"Político {args.politico_id} não tem instagram_username preenchido.")
+    
+    # Obtém o UUID do político (necessário para inserir em social_media_posts)
+    politico_uuid = pol.get("uuid")
+    if not politico_uuid and args.apply:
+        if not supabase_url or not supabase_key:
+            raise SystemExit("Para --apply, precisa do UUID do político. Defina SUPABASE_URL e SUPABASE_KEY.")
+        supa_ro = create_client(supabase_url, supabase_key)
+        pol_data = supa_ro.table("politico").select("uuid").eq("id", args.politico_id).single().execute().data
+        politico_uuid = pol_data.get("uuid") if pol_data else None
+    if args.apply and not politico_uuid:
+        raise SystemExit(f"Político {args.politico_id} não tem UUID no banco de dados.")
 
     profile_url = f"https://www.instagram.com/{ig_user}"
     actor_input = {
@@ -371,14 +382,14 @@ def main() -> None:
                 if not p.get("post_shortcode"):
                     continue
                 row = dict(p)
-                row["politico_id"] = args.politico_id
+                row["politico_id"] = politico_uuid  # Usa UUID para a FK
                 supabase.table("instagram_posts").upsert(row, on_conflict="post_shortcode").execute()
                 inserted += 1
         else:
             for p in top_posts:
                 if not p.get("post_shortcode"):
                     continue
-                row = to_social_media_post(args.politico_id, p, actor_id=args.actor_id)
+                row = to_social_media_post(politico_uuid, p, actor_id=args.actor_id)  # Usa UUID para a FK
                 if args.with_comments:
                     sc = p.get("post_shortcode")
                     if sc and sc in comment_summary_by_shortcode:
@@ -388,8 +399,8 @@ def main() -> None:
                             ai_text = ai_summary_by_shortcode[sc]
                             row["comment_summary_ai"] = ai_text
                             row["metadata"]["comment_summary_ai"] = ai_text
-                # projeto já usa on_conflict="plataforma,post_id" para social_media_posts
-                supabase.table("social_media_posts").upsert(row, on_conflict="plataforma,post_id").execute()
+                # unique agora é por politico_id+plataforma+post_id
+                supabase.table("social_media_posts").upsert(row, on_conflict="politico_id,plataforma,post_id").execute()
                 inserted += 1
         out["inserted"] = inserted
 

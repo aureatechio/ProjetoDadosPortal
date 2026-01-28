@@ -39,14 +39,20 @@ export type Noticia = {
 export type InstagramPost = {
   id: string
   politico_id: number
-  post_shortcode: string
+  post_shortcode?: string
+  post_id?: string
   post_url?: string | null
   caption?: string | null
+  conteudo?: string | null
   likes?: number
   comments?: number
+  shares?: number
+  views?: number
   engagement_score?: number
   media_type?: string | null
   thumbnail_url?: string | null
+  media_url?: string | null
+  plataforma?: string | null
   posted_at?: string | null
   collected_at?: string | null
 }
@@ -135,8 +141,19 @@ export type PoliticoResumo = {
   top_instagram: InstagramPost[]
   concorrentes: Politico[]
   noticias_cidade: Noticia[]
+  noticias_estado: Noticia[]
+  noticias_capital: Noticia[]
   total_noticias: number
   total_posts_instagram: number
+  total_mencoes?: number
+}
+
+export type ConcorrenteResumo = {
+  politico: Politico
+  noticias: Noticia[]
+  total_noticias: number
+  instagram: InstagramPost[]
+  total_instagram: number
 }
 
 // ==================== CONSULTA PROCESSUAL ====================

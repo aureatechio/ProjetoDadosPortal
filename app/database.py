@@ -3,8 +3,9 @@ Cliente Supabase para operações no banco de dados.
 """
 from supabase import create_client, Client
 from typing import Optional, List, Dict, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
+from postgrest.types import CountMethod
 
 from app.config import settings
 
@@ -23,14 +24,80 @@ class Database:
     # ==================== POLÍTICOS ====================
     
     def get_politicos_ativos(self) -> List[Dict[str, Any]]:
-        """Retorna todos os políticos ativos com dados de redes sociais"""
-        response = self.client.table("politico").select("*").eq("active", True).execute()
-        return response.data
+        """Retorna todos os políticos ativos."""
+        # PostgREST costuma impor um limite padrão (~1000 linhas). Paginar garante
+        # que a API retorne todos os políticos.
+        page_size = 1000
+        offset = 0
+        rows: List[Dict[str, Any]] = []
+
+        while True:
+            query = (
+                self.client.table("politico")
+                .select("*")
+                .eq("active", True)
+            )
+            response = (
+                query.order("id", desc=False)
+                .limit(page_size)
+                .offset(offset)
+                .execute()
+            )
+            batch = response.data or []
+            rows.extend(batch)
+
+            if len(batch) < page_size:
+                break
+            offset += page_size
+
+        return rows
+
+    def get_politicos_diretoriaja(self) -> List[Dict[str, Any]]:
+        """Retorna políticos com usar_diretoriaja = true (sem filtrar por active)."""
+        page_size = 1000
+        offset = 0
+        rows: List[Dict[str, Any]] = []
+
+        while True:
+            response = (
+                self.client.table("politico")
+                .select("*")
+                .eq("usar_diretoriaja", True)
+                .order("id", desc=False)
+                .limit(page_size)
+                .offset(offset)
+                .execute()
+            )
+            batch = response.data or []
+            rows.extend(batch)
+
+            if len(batch) < page_size:
+                break
+            offset += page_size
+
+        return rows
     
     def get_politico_by_id(self, politico_id: int) -> Optional[Dict[str, Any]]:
         """Retorna um político pelo ID"""
         response = self.client.table("politico").select("*").eq("id", politico_id).single().execute()
         return response.data
+    
+    def get_politico_uuid(self, politico_id: int) -> Optional[str]:
+        """Retorna o UUID de um político dado o ID inteiro"""
+        politico = self.get_politico_by_id(politico_id)
+        return politico.get("uuid") if politico else None
+
+    # ==================== HELPERS ====================
+
+    def _safe_count(self, response: Any) -> int:
+        """
+        Extrai o campo `count` de uma resposta do PostgREST/supabase-py.
+        """
+        try:
+            count = getattr(response, "count", None)
+            return int(count or 0)
+        except Exception:
+            return 0
 
     def update_politico_socials(
         self,
@@ -71,6 +138,84 @@ class Database:
             .eq("politico_id", politico_id)\
             .execute()
         return [item["politico"] for item in response.data if item.get("politico")]
+
+    def get_concorrentes_twitter_insights(
+        self,
+        politico_id: int,
+        *,
+        days_back: int = 7,
+        limit_top_mentions: int = 3,
+    ) -> List[Dict[str, Any]]:
+        """
+        Retorna insights de Twitter/X para os concorrentes de um político:
+        - followers_count (snapshot mais recente em concorrente_twitter_insights, se existir)
+        - top 3 menções mais engajadas (preferindo snapshot; fallback em social_mentions)
+
+        Observações:
+        - social_mentions usa politico_id como UUID (string) no Supabase.
+        - o snapshot diário é mantido por scripts em scripts/collect_concorrentes_twitter_insights.py
+        """
+        concorrentes = self.get_concorrentes(politico_id)
+        if not concorrentes:
+            return []
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=int(days_back))).isoformat()
+        out: List[Dict[str, Any]] = []
+
+        for c in concorrentes:
+            cuuid = (c.get("uuid") or "").strip()
+            if not cuuid:
+                continue
+
+            # 1) Tenta usar snapshot (se existir)
+            snapshot = None
+            try:
+                snap_resp = (
+                    self.client.table("concorrente_twitter_insights")
+                    .select("followers_count,top_mentions,computed_at,computed_date,mentions_window_days,twitter_username")
+                    .eq("concorrente_politico_id", cuuid)
+                    .eq("mentions_window_days", int(days_back))
+                    .order("computed_at", desc=True)
+                    .limit(1)
+                    .execute()
+                )
+                rows = snap_resp.data or []
+                snapshot = rows[0] if rows else None
+            except Exception:
+                snapshot = None
+
+            followers_count = snapshot.get("followers_count") if isinstance(snapshot, dict) else None
+            top_mentions = snapshot.get("top_mentions") if isinstance(snapshot, dict) else None
+            snapshot_at = snapshot.get("computed_at") if isinstance(snapshot, dict) else None
+
+            # 2) Fallback: calcula top mentions direto de social_mentions
+            if not isinstance(top_mentions, list) or len(top_mentions) == 0:
+                try:
+                    mentions_resp = (
+                        self.client.table("social_mentions")
+                        .select("*")
+                        .eq("politico_id", cuuid)
+                        .eq("plataforma", "twitter")
+                        .gte("collected_at", cutoff)
+                        .order("engagement_score", desc=True)
+                        .limit(int(limit_top_mentions))
+                        .execute()
+                    )
+                    top_mentions = mentions_resp.data or []
+                except Exception:
+                    top_mentions = []
+
+            out.append(
+                {
+                    "politico": c,
+                    "followers_count": followers_count,
+                    "top_mentions": top_mentions[: int(limit_top_mentions)] if isinstance(top_mentions, list) else [],
+                    "snapshot_at": snapshot_at,
+                    "days_back": int(days_back),
+                }
+            )
+
+        return out
     
     # ==================== NOTÍCIAS ====================
     
@@ -113,17 +258,130 @@ class Database:
         self, 
         politico_id: int, 
         limit: int = 20,
-        min_score: float = 0
+        min_score: float = 0,
+        diversificar_fontes: bool = True
     ) -> List[Dict[str, Any]]:
-        """Retorna notícias de um político ordenadas por relevância"""
+        """
+        Retorna notícias de um político ordenadas por relevância.
+        
+        Args:
+            politico_id: ID do político
+            limit: Número máximo de notícias
+            min_score: Score mínimo de relevância
+            diversificar_fontes: Se True, diversifica as notícias por fonte/canal
+        """
+        # Converte ID inteiro para UUID
+        politico_uuid = self.get_politico_uuid(politico_id)
+        if not politico_uuid:
+            return []
+        
+        # Busca mais notícias para poder diversificar
+        fetch_limit = limit * 5 if diversificar_fontes else limit
+        
         response = self.client.table("noticias")\
             .select("*")\
-            .eq("politico_id", politico_id)\
+            .eq("politico_id", politico_uuid)\
             .gte("relevancia_total", min_score)\
             .order("relevancia_total", desc=True)\
-            .limit(limit)\
+            .limit(fetch_limit)\
             .execute()
-        return response.data
+        
+        noticias = response.data or []
+        
+        if not diversificar_fontes or len(noticias) <= limit:
+            return noticias[:limit]
+        
+        # Diversifica as notícias por fonte
+        return self._diversificar_noticias_por_fonte(noticias, limit)
+
+    def count_noticias_politico(self, politico_id: int, min_score: float = 0) -> int:
+        """
+        Retorna a contagem total de notícias de um político (sem carregar os registros).
+        """
+        politico_uuid = self.get_politico_uuid(politico_id)
+        if not politico_uuid:
+            return 0
+        try:
+            response = (
+                self.client.table("noticias")
+                .select("id", count=CountMethod.exact)
+                .eq("politico_id", politico_uuid)
+                .gte("relevancia_total", min_score)
+                .execute()
+            )
+            return self._safe_count(response)
+        except Exception as e:
+            logger.error(f"Erro ao contar noticias do politico {politico_id}: {e}")
+            return 0
+    
+    def _diversificar_noticias_por_fonte(
+        self, 
+        noticias: List[Dict[str, Any]], 
+        limit: int
+    ) -> List[Dict[str, Any]]:
+        """
+        Diversifica uma lista de notícias para incluir diferentes fontes/canais.
+        
+        Utiliza um algoritmo round-robin que alterna entre fontes diferentes,
+        mantendo a ordenação por relevância dentro de cada fonte.
+        """
+        if not noticias:
+            return []
+        
+        # Agrupa notícias por fonte
+        por_fonte: Dict[str, List[Dict[str, Any]]] = {}
+        for noticia in noticias:
+            fonte = noticia.get("fonte_nome") or noticia.get("fonte_id") or "desconhecida"
+            if fonte not in por_fonte:
+                por_fonte[fonte] = []
+            por_fonte[fonte].append(noticia)
+        
+        # Se só tem uma fonte, retorna ordenado por relevância
+        if len(por_fonte) <= 1:
+            return noticias[:limit]
+        
+        # Ordena fontes pelo melhor score de cada uma (para priorizar fontes relevantes)
+        fontes_ordenadas = sorted(
+            por_fonte.keys(),
+            key=lambda f: max((n.get("relevancia_total") or 0) for n in por_fonte[f]),
+            reverse=True
+        )
+        
+        # Alterna entre fontes usando round-robin
+        resultado: List[Dict[str, Any]] = []
+        urls_vistas = set()  # Evita duplicatas
+        indices = {fonte: 0 for fonte in fontes_ordenadas}
+        
+        while len(resultado) < limit:
+            adicionou_alguma = False
+            
+            for fonte in fontes_ordenadas:
+                if len(resultado) >= limit:
+                    break
+                
+                lista_fonte = por_fonte[fonte]
+                idx = indices[fonte]
+                
+                # Encontra a próxima notícia válida desta fonte
+                while idx < len(lista_fonte):
+                    noticia = lista_fonte[idx]
+                    url = noticia.get("url")
+                    
+                    if url not in urls_vistas:
+                        urls_vistas.add(url)
+                        resultado.append(noticia)
+                        indices[fonte] = idx + 1
+                        adicionou_alguma = True
+                        break
+                    
+                    idx += 1
+                    indices[fonte] = idx
+            
+            # Se não conseguiu adicionar nenhuma notícia, para o loop
+            if not adicionou_alguma:
+                break
+        
+        return resultado
     
     def get_noticias_cidade(
         self, 
@@ -163,6 +421,149 @@ class Database:
             .limit(limit)\
             .execute()
         return response.data
+    
+    def get_noticias_capital(
+        self,
+        estado: str,
+        limit: int = 3
+    ) -> List[Dict[str, Any]]:
+        """
+        Retorna notícias da capital/cidade de um estado ordenadas por relevância.
+        (tipo='cidade' com cidade preenchida)
+        
+        Args:
+            estado: Sigla do estado (ex: SP, RJ, MG)
+            limit: Número máximo de notícias (padrão: 3)
+            
+        Returns:
+            Lista de notícias da capital/cidade
+        """
+        response = self.client.table("noticias")\
+            .select("*")\
+            .eq("tipo", "cidade")\
+            .eq("estado", estado)\
+            .not_.is_("cidade", "null")\
+            .order("relevancia_total", desc=True)\
+            .limit(limit)\
+            .execute()
+        return response.data
+    
+    def get_noticias_nivel_estado(
+        self,
+        estado: str,
+        limit: int = 3
+    ) -> List[Dict[str, Any]]:
+        """
+        Retorna notícias a nível de estado ordenadas por relevância.
+        (tipo='estado' sem cidade - governo, assembleia, política estadual)
+        
+        Args:
+            estado: Sigla do estado (ex: SP, RJ, MG)
+            limit: Número máximo de notícias (padrão: 3)
+            
+        Returns:
+            Lista de notícias do estado
+        """
+        response = self.client.table("noticias")\
+            .select("*")\
+            .eq("tipo", "estado")\
+            .eq("estado", estado)\
+            .is_("cidade", "null")\
+            .order("relevancia_total", desc=True)\
+            .limit(limit)\
+            .execute()
+        return response.data
+    
+    def get_noticias_todas_capitais(
+        self,
+        limit_por_capital: int = 3
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Retorna notícias de todas as capitais/cidades agrupadas por estado.
+        (tipo='cidade')
+        
+        Args:
+            limit_por_capital: Número máximo de notícias por capital (padrão: 3)
+            
+        Returns:
+            Dict com estado como chave e lista de notícias como valor
+        """
+        # Busca todas as notícias de cidades
+        response = self.client.table("noticias")\
+            .select("*")\
+            .eq("tipo", "cidade")\
+            .not_.is_("cidade", "null")\
+            .order("relevancia_total", desc=True)\
+            .execute()
+        
+        # Agrupa por estado e limita
+        noticias_por_estado: Dict[str, List[Dict[str, Any]]] = {}
+        
+        for noticia in response.data:
+            estado = noticia.get("estado")
+            if estado:
+                if estado not in noticias_por_estado:
+                    noticias_por_estado[estado] = []
+                if len(noticias_por_estado[estado]) < limit_por_capital:
+                    noticias_por_estado[estado].append(noticia)
+        
+        return noticias_por_estado
+    
+    def get_noticias_todos_estados(
+        self,
+        limit_por_estado: int = 3
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Retorna notícias a nível de estado agrupadas por estado.
+        (tipo='estado' sem cidade)
+        
+        Args:
+            limit_por_estado: Número máximo de notícias por estado (padrão: 3)
+            
+        Returns:
+            Dict com estado como chave e lista de notícias como valor
+        """
+        # Busca todas as notícias de estados
+        response = self.client.table("noticias")\
+            .select("*")\
+            .eq("tipo", "estado")\
+            .is_("cidade", "null")\
+            .order("relevancia_total", desc=True)\
+            .execute()
+        
+        # Agrupa por estado e limita
+        noticias_por_estado: Dict[str, List[Dict[str, Any]]] = {}
+        
+        for noticia in response.data:
+            estado = noticia.get("estado")
+            if estado:
+                if estado not in noticias_por_estado:
+                    noticias_por_estado[estado] = []
+                if len(noticias_por_estado[estado]) < limit_por_estado:
+                    noticias_por_estado[estado].append(noticia)
+        
+        return noticias_por_estado
+    
+    def get_estados_com_noticias(self) -> List[str]:
+        """
+        Retorna lista de estados que possuem notícias coletadas.
+        
+        Returns:
+            Lista de siglas de estados
+        """
+        response = self.client.table("noticias")\
+            .select("estado")\
+            .in_("tipo", ["estado", "cidade"])\
+            .not_.is_("estado", "null")\
+            .execute()
+        
+        # Extrai estados únicos
+        estados = set()
+        for row in response.data:
+            if row.get("estado"):
+                estados.add(row["estado"])
+        
+        return sorted(list(estados))
     
     def limpar_noticias_antigas(self, dias: int = 7) -> int:
         """Remove notícias mais antigas que X dias"""
@@ -207,13 +608,81 @@ class Database:
         limit: int = 10
     ) -> List[Dict[str, Any]]:
         """Retorna posts do Instagram ordenados por engajamento"""
+        # Converte ID inteiro para UUID
+        politico_uuid = self.get_politico_uuid(politico_id)
+        if not politico_uuid:
+            return []
+        
         response = self.client.table("instagram_posts")\
             .select("*")\
-            .eq("politico_id", politico_id)\
+            .eq("politico_id", politico_uuid)\
             .order("engagement_score", desc=True)\
             .limit(limit)\
             .execute()
         return response.data
+
+    def count_instagram_posts(self, politico_id: int) -> int:
+        """
+        Retorna a contagem total de posts de Instagram para um político.
+
+        Prioriza a tabela unificada `social_media_posts` (plataforma='instagram').
+        Se estiver vazia, faz fallback para a tabela legada `instagram_posts`.
+        """
+        politico_uuid = self.get_politico_uuid(politico_id)
+        if not politico_uuid:
+            return 0
+
+        # 1) Tabela unificada
+        try:
+            unified = (
+                self.client.table("social_media_posts")
+                .select("id", count=CountMethod.exact)
+                .eq("politico_id", politico_uuid)
+                .eq("plataforma", "instagram")
+                .execute()
+            )
+            unified_count = self._safe_count(unified)
+            if unified_count > 0:
+                return unified_count
+        except Exception as e:
+            logger.error(f"Erro ao contar posts (unificado) do politico {politico_id}: {e}")
+
+        # 2) Tabela legada
+        try:
+            legacy = (
+                self.client.table("instagram_posts")
+                .select("id", count=CountMethod.exact)
+                .eq("politico_id", politico_uuid)
+                .execute()
+            )
+            return self._safe_count(legacy)
+        except Exception as e:
+            logger.error(f"Erro ao contar posts (legado) do politico {politico_id}: {e}")
+            return 0
+
+    # ==================== SOCIAL MENTIONS ====================
+
+    def count_social_mentions_politico(self, politico_id: int, plataforma: Optional[str] = None) -> int:
+        """
+        Retorna a contagem total de menções sociais de um político.
+        """
+        politico_uuid = self.get_politico_uuid(politico_id)
+        if not politico_uuid:
+            return 0
+
+        try:
+            query = (
+                self.client.table("social_mentions")
+                .select("id", count=CountMethod.exact)
+                .eq("politico_id", politico_uuid)
+            )
+            if plataforma:
+                query = query.eq("plataforma", plataforma)
+            response = query.execute()
+            return self._safe_count(response)
+        except Exception as e:
+            logger.error(f"Erro ao contar social_mentions do politico {politico_id}: {e}")
+            return 0
     
     def limpar_instagram_antigos(self, dias: int = 30) -> int:
         """Remove posts do Instagram mais antigos que X dias"""
@@ -231,7 +700,7 @@ class Database:
         try:
             response = self.client.table("social_media_posts").upsert(
                 post,
-                on_conflict="plataforma,post_id"
+                on_conflict="politico_id,plataforma,post_id"
             ).execute()
             return response.data[0] if response.data else None
         except Exception as e:
@@ -245,7 +714,7 @@ class Database:
         try:
             response = self.client.table("social_media_posts").upsert(
                 posts,
-                on_conflict="plataforma,post_id"
+                on_conflict="politico_id,plataforma,post_id"
             ).execute()
             return len(response.data) if response.data else 0
         except Exception as e:
@@ -259,9 +728,14 @@ class Database:
         limit: int = 10
     ) -> List[Dict[str, Any]]:
         """Retorna posts de redes sociais ordenados por engajamento"""
+        # Converte ID inteiro para UUID
+        politico_uuid = self.get_politico_uuid(politico_id)
+        if not politico_uuid:
+            return []
+        
         query = self.client.table("social_media_posts")\
             .select("*")\
-            .eq("politico_id", politico_id)
+            .eq("politico_id", politico_uuid)
         
         if plataforma:
             query = query.eq("plataforma", plataforma)
@@ -425,9 +899,14 @@ class Database:
         limit: int = 50
     ) -> List[Dict[str, Any]]:
         """Retorna menções sociais de um político ordenadas por engajamento"""
+        # Converte ID inteiro para UUID
+        politico_uuid = self.get_politico_uuid(politico_id)
+        if not politico_uuid:
+            return []
+        
         query = self.client.table("social_mentions")\
             .select("*")\
-            .eq("politico_id", politico_id)
+            .eq("politico_id", politico_uuid)
         
         if plataforma:
             query = query.eq("plataforma", plataforma)
@@ -445,9 +924,14 @@ class Database:
         limit: int = 20
     ) -> List[Dict[str, Any]]:
         """Retorna menções sociais de um político filtradas por assunto"""
+        # Converte ID inteiro para UUID
+        politico_uuid = self.get_politico_uuid(politico_id)
+        if not politico_uuid:
+            return []
+        
         response = self.client.table("social_mentions")\
             .select("*")\
-            .eq("politico_id", politico_id)\
+            .eq("politico_id", politico_uuid)\
             .eq("assunto", assunto)\
             .order("posted_at", desc=True)\
             .limit(limit)\
@@ -461,9 +945,14 @@ class Database:
         fim: datetime
     ) -> List[Dict[str, Any]]:
         """Retorna menções sociais de um político em um período específico"""
+        # Converte ID inteiro para UUID
+        politico_uuid = self.get_politico_uuid(politico_id)
+        if not politico_uuid:
+            return []
+        
         response = self.client.table("social_mentions")\
             .select("*")\
-            .eq("politico_id", politico_id)\
+            .eq("politico_id", politico_uuid)\
             .gte("collected_at", inicio.isoformat())\
             .lte("collected_at", fim.isoformat())\
             .execute()
@@ -500,9 +989,14 @@ class Database:
         politico_id: int
     ) -> List[Dict[str, Any]]:
         """Retorna todos os tópicos de menções de um político"""
+        # Converte ID inteiro para UUID
+        politico_uuid = self.get_politico_uuid(politico_id)
+        if not politico_uuid:
+            return []
+        
         response = self.client.table("mention_topics")\
             .select("*")\
-            .eq("politico_id", politico_id)\
+            .eq("politico_id", politico_uuid)\
             .order("total_mencoes", desc=True)\
             .execute()
         return response.data
@@ -513,9 +1007,14 @@ class Database:
         limite: int = 10
     ) -> List[Dict[str, Any]]:
         """Retorna os principais assuntos discutidos sobre um político"""
+        # Converte ID inteiro para UUID
+        politico_uuid = self.get_politico_uuid(politico_id)
+        if not politico_uuid:
+            return []
+        
         response = self.client.table("mention_topics")\
             .select("*")\
-            .eq("politico_id", politico_id)\
+            .eq("politico_id", politico_uuid)\
             .order("total_mencoes", desc=True)\
             .limit(limite)\
             .execute()

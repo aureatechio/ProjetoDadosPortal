@@ -1,6 +1,6 @@
 import type { SocialMention } from '../types'
 
-export function SocialMentionCard({ m }: { m: SocialMention }) {
+export function SocialMentionCard({ mention: m }: { mention: SocialMention }) {
   const when = m.posted_at ?? m.collected_at ?? null
   const dateLabel = when ? formatDateTime(when) : null
   const score = typeof m.engagement_score === 'number' ? m.engagement_score : null

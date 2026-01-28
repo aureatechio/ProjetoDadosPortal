@@ -17,6 +17,7 @@ import type {
   ResumoProcessual,
   ConsultaProcessualResponse,
   ConsultaLog,
+  ConcorrenteResumo,
 } from '../types'
 
 export const portalApi = {
@@ -35,6 +36,8 @@ export const portalApi = {
     apiFetch<TrendingTopic[]>(`/trending${category ? `?category=${category}` : ''}`),
   getNoticiasPolitica: () => apiFetch<Noticia[]>('/noticias/politica'),
   getNoticiasEstado: (estado: string, limit = 30) => apiFetch<Noticia[]>(`/noticias/estado/${encodeURIComponent(estado)}?limit=${limit}`),
+  getNoticiasCapital: (estado: string, limit = 3) => apiFetch<Noticia[]>(`/noticias/capital/${encodeURIComponent(estado)}?limit=${limit}`),
+  getNoticiasTodasCapitais: (limitPorCapital = 3) => apiFetch<{ noticias_por_estado: Record<string, Noticia[]>; estados_com_noticias: string[]; total_estados: number }>(`/noticias/capitais?limit_por_capital=${limitPorCapital}`),
   getNoticiaAnalise: (noticiaId: string) =>
     apiFetch<{
       noticia_id: string
@@ -44,6 +47,9 @@ export const portalApi = {
       hipoteses: string[]
       alertas: string[]
     }>(`/noticias/${noticiaId}/analise`),
+
+  getResumoConcorrentes: (politicoId: number, limitNoticias = 5) =>
+    apiFetch<ConcorrenteResumo[]>(`/politicos/${politicoId}/concorrentes/resumo?limit_noticias=${limitNoticias}`),
 
   getSocialMentionsPolitico: (id: number, plataforma?: string | null, limit = 50) =>
     apiFetch<SocialMention[]>(
