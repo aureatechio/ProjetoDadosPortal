@@ -1,0 +1,52 @@
+# Configuração do Digital Ocean App Platform
+# Portal de Dados Políticos - Backend API + Scheduler
+
+name: portal-dados-backend
+region: nyc
+
+services:
+  - name: api
+    dockerfile_path: Dockerfile
+    source_dir: /
+    github:
+      repo: aureatechio/ProjetoDadosPortal
+      branch: main
+      deploy_on_push: true
+    http_port: 8000
+    instance_count: 1
+    instance_size_slug: basic-xxs
+    routes:
+      - path: /
+    
+    # Variáveis de ambiente (configure no painel da Digital Ocean)
+    envs:
+      - key: SUPABASE_URL
+        scope: RUN_TIME
+        type: SECRET
+      - key: SUPABASE_KEY
+        scope: RUN_TIME
+        type: SECRET
+      - key: NEWSAPI_KEY
+        scope: RUN_TIME
+        type: SECRET
+      - key: OPENAI_API_KEY
+        scope: RUN_TIME
+        type: SECRET
+      - key: APIFY_TOKEN
+        scope: RUN_TIME
+        type: SECRET
+      - key: COLETA_HORARIO
+        scope: RUN_TIME
+        value: "06:00"
+      - key: COLETA_TIMEZONE
+        scope: RUN_TIME
+        value: "America/Sao_Paulo"
+    
+    # Health check
+    health_check:
+      http_path: /health
+      initial_delay_seconds: 10
+      period_seconds: 30
+      timeout_seconds: 10
+      success_threshold: 1
+      failure_threshold: 3
