@@ -1,0 +1,6 @@
+politico_id,wikidata_qid,camara_id,senado_id,observacao
+# Exemplo: 1,Q123456,204554,,
+# Coloque aqui os identificadores oficiais por politico_id.
+# - wikidata_qid: formato Qxxxx (ex: Q42)
+# - camara_id: id numérico de deputado na API da Câmara (quando aplicável)
+# - senado_id: id numérico de senador na API do Senado (quando aplicável)

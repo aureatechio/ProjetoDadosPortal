@@ -1,0 +1,26 @@
+fastapi>=0.109.0
+uvicorn>=0.27.0
+supabase>=2.3.0
+instaloader>=4.10.3
+gnews>=0.3.7
+newsapi-python>=0.2.7
+apscheduler>=3.10.4
+python-dotenv>=1.0.0
+pydantic>=2.5.3
+pydantic-settings>=2.1.0
+httpx>=0.24.0
+beautifulsoup4>=4.12.3
+newspaper3k>=0.2.8
+fuzzywuzzy>=0.18.0
+python-Levenshtein>=0.23.0
+lxml>=5.1.0
+openai>=2.16.0
+# Novas dependências para menções sociais
+pytrends>=4.9.0
+pandas>=2.0.0
+
+# Dependências para consulta processual
+selenium>=4.15.0
+undetected-chromedriver>=3.5.0
+requests-html>=0.10.0
+aiofiles>=23.2.0
