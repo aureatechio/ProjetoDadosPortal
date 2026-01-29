@@ -592,11 +592,13 @@ class TwitterTrendingCollector:
 class GoogleTrendingCollector:
     """
     Coleta trending topics do Google Trends Brasil.
-    Usa pytrends como fonte primária.
+    Usa múltiplas fontes: RSS do Google Trends, pytrends, e scraping como fallback.
     """
     
     def __init__(self):
         self._pytrend: Optional['TrendReq'] = None
+        # URL do RSS de trending do Google (mais confiável que pytrends)
+        self.rss_url = "https://trends.google.com.br/trending/rss?geo=BR"
     
     @property
     def disponivel(self) -> bool:
@@ -615,20 +617,66 @@ class GoogleTrendingCollector:
             )
         return self._pytrend
     
-    async def identificar_trending_topics(self, max_topics: int = 10) -> List[Dict[str, Any]]:
+    async def _fetch_rss_trending(self, max_topics: int = 10) -> List[Dict[str, Any]]:
         """
-        Identifica os trending topics do Google Trends Brasil.
-        
-        Args:
-            max_topics: Número máximo de topics a retornar
-            
-        Returns:
-            Lista de trending topics com rank, título e descrição
+        Busca trending via RSS do Google Trends (método mais confiável).
         """
-        logger.info("Identificando trending topics do Google Trends")
+        try:
+            import httpx
+            from xml.etree import ElementTree
+        except ImportError:
+            logger.warning("httpx não disponível para RSS")
+            return []
         
+        topics = []
+        
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(
+                    self.rss_url,
+                    headers={
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                    }
+                )
+                response.raise_for_status()
+                
+                # Parse XML
+                root = ElementTree.fromstring(response.text)
+                
+                # Namespace do RSS
+                ns = {'ht': 'https://trends.google.com.br/trends/trendingsearches/daily'}
+                
+                items = root.findall('.//item')
+                
+                for rank, item in enumerate(items[:max_topics], 1):
+                    title_elem = item.find('title')
+                    traffic_elem = item.find('ht:approx_traffic', ns)
+                    
+                    if title_elem is not None and title_elem.text:
+                        title = title_elem.text.strip()
+                        traffic = ""
+                        if traffic_elem is not None and traffic_elem.text:
+                            traffic = traffic_elem.text.strip()
+                        
+                        subtitle = f"Pesquisa em alta - {traffic} buscas" if traffic else "Pesquisa em alta no Google Brasil"
+                        
+                        topics.append({
+                            "rank": rank,
+                            "title": title,
+                            "subtitle": subtitle
+                        })
+                
+                if topics:
+                    logger.info(f"Encontrados {len(topics)} trending do Google via RSS")
+                    
+        except Exception as e:
+            logger.warning(f"Erro ao buscar RSS do Google Trends: {e}")
+        
+        return topics
+    
+    async def _fetch_pytrends_trending(self, max_topics: int = 10) -> List[Dict[str, Any]]:
+        """Busca trending via pytrends (pode falhar com 404/429)"""
         if not PYTRENDS_AVAILABLE:
-            logger.warning("pytrends não disponível. Execute: pip install pytrends")
             return []
         
         pytrend = self._get_pytrend()
@@ -636,10 +684,9 @@ class GoogleTrendingCollector:
             return []
         
         topics = []
+        loop = asyncio.get_event_loop()
         
         try:
-            loop = asyncio.get_event_loop()
-            
             # Tenta trending_searches primeiro
             trending_df = await loop.run_in_executor(
                 None,
@@ -656,10 +703,10 @@ class GoogleTrendingCollector:
                         "subtitle": "Pesquisa em alta no Google Brasil"
                     })
                 
-                logger.info(f"Encontrados {len(topics)} trending do Google Trends")
+                logger.info(f"Encontrados {len(topics)} trending via pytrends")
                 
         except Exception as e:
-            logger.warning(f"Erro em trending_searches: {e}")
+            logger.warning(f"Erro em pytrends trending_searches: {e}")
             
             # Fallback: tenta realtime_trending_searches
             try:
@@ -681,10 +728,41 @@ class GoogleTrendingCollector:
                             "subtitle": "Pesquisa em alta no Google Brasil"
                         })
                     
-                    logger.info(f"Encontrados {len(topics)} trending do Google (realtime)")
+                    logger.info(f"Encontrados {len(topics)} trending via pytrends (realtime)")
                     
             except Exception as e2:
-                logger.error(f"Erro em realtime_trending_searches: {e2}")
+                logger.warning(f"Erro em pytrends realtime: {e2}")
+        
+        return topics
+    
+    async def identificar_trending_topics(self, max_topics: int = 10) -> List[Dict[str, Any]]:
+        """
+        Identifica os trending topics do Google Trends Brasil.
+        Usa múltiplas fontes com fallback:
+        1. RSS do Google Trends (mais confiável)
+        2. pytrends trending_searches
+        3. pytrends realtime_trending_searches
+        
+        Args:
+            max_topics: Número máximo de topics a retornar
+            
+        Returns:
+            Lista de trending topics com rank, título e descrição
+        """
+        logger.info("Identificando trending topics do Google Trends")
+        
+        # Tenta RSS primeiro (mais confiável)
+        topics = await self._fetch_rss_trending(max_topics)
+        
+        # Se RSS falhou, tenta pytrends
+        if not topics:
+            logger.info("RSS falhou, tentando pytrends como fallback")
+            topics = await self._fetch_pytrends_trending(max_topics)
+        
+        if topics:
+            logger.info(f"Total: {len(topics)} trending topics do Google")
+        else:
+            logger.warning("Nenhum trending do Google encontrado em todas as fontes")
         
         return topics
     
