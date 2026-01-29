@@ -19,6 +19,13 @@ try:
 except ImportError:
     PYTRENDS_AVAILABLE = False
 
+# Tenta importar Playwright para scraping
+try:
+    from playwright.async_api import async_playwright
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -265,6 +272,108 @@ class TrendingCollector:
         
         return topics
     
+    async def _scrape_google_trends_politics(self, max_topics: int = 15) -> List[Dict[str, Any]]:
+        """
+        Faz scraping da página de trending topics de política do Google Trends.
+        Usa Playwright para renderizar JavaScript.
+        URL: https://trends.google.com.br/trending?geo=BR&category=14
+        Categoria 14 = Legislação e governo (Política)
+        """
+        if not PLAYWRIGHT_AVAILABLE:
+            logger.warning("Playwright não disponível para scraping")
+            return []
+        
+        url = "https://trends.google.com.br/trending?geo=BR&category=14"
+        topics = []
+        
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                context = await browser.new_context(
+                    locale='pt-BR',
+                    timezone_id='America/Sao_Paulo',
+                    user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+                )
+                page = await context.new_page()
+                
+                try:
+                    logger.info(f"Scraping Google Trends política: {url}")
+                    # Usa domcontentloaded em vez de networkidle para ser mais rápido
+                    await page.goto(url, wait_until='domcontentloaded', timeout=30000)
+                    
+                    # Aguarda a tabela carregar
+                    try:
+                        await page.wait_for_selector('table', timeout=20000)
+                    except:
+                        logger.warning("Tabela não encontrada no Google Trends")
+                    
+                    await asyncio.sleep(3)  # Aguarda JavaScript carregar dados
+                    
+                    # Script JavaScript para extrair dados
+                    extract_script = """
+                    () => {
+                        const topics = [];
+                        const rows = document.querySelectorAll('table tbody tr');
+                        
+                        rows.forEach((row, index) => {
+                            let titulo = '';
+                            const titleEl = row.querySelector('.mZ3RIc, .title, [data-title], a');
+                            if (titleEl) {
+                                titulo = titleEl.textContent.trim();
+                            } else {
+                                const cells = row.querySelectorAll('td, [role="cell"]');
+                                if (cells.length > 0) {
+                                    titulo = cells[0].textContent.trim();
+                                }
+                            }
+                            
+                            let buscas = 'N/A';
+                            const volumeEl = row.querySelector('.lqv0Cb, .volume, [data-volume]');
+                            if (volumeEl) {
+                                buscas = volumeEl.textContent.trim();
+                            } else {
+                                const cells = row.querySelectorAll('td, [role="cell"]');
+                                if (cells.length > 1) {
+                                    buscas = cells[1].textContent.trim();
+                                }
+                            }
+                            
+                            if (titulo && titulo.length > 1) {
+                                topics.push({
+                                    rank: index + 1,
+                                    title: titulo,
+                                    traffic: buscas
+                                });
+                            }
+                        });
+                        
+                        return topics.slice(0, 30);
+                    }
+                    """
+                    
+                    extracted = await page.evaluate(extract_script)
+                    
+                    if extracted:
+                        for item in extracted[:max_topics]:
+                            topics.append({
+                                "title": item.get("title", ""),
+                                "subtitle": f"Buscas: {item.get('traffic', 'N/A')}",
+                                "traffic": item.get("traffic", ""),
+                                "rank": item.get("rank", 0)
+                            })
+                        
+                        logger.info(f"Scraping: encontrados {len(topics)} trending de política")
+                    
+                except Exception as e:
+                    logger.error(f"Erro no scraping do Google Trends: {e}")
+                finally:
+                    await browser.close()
+                    
+        except Exception as e:
+            logger.error(f"Erro ao iniciar Playwright: {e}")
+        
+        return topics
+    
     async def _fetch_political_news_rss(self) -> List[Dict[str, Any]]:
         """
         Busca notícias políticas via Google News RSS (fonte mais confiável).
@@ -409,22 +518,43 @@ class TrendingCollector:
             return main_headline[:117] + "..."
         return main_headline
     
-    async def identificar_trending_topics(self, max_topics: int = 10) -> List[Dict[str, Any]]:
+    async def identificar_trending_topics(self, max_topics: int = 10, use_scraping: bool = True) -> List[Dict[str, Any]]:
         """
         Identifica os principais trending topics políticos.
         
-        Usa múltiplas fontes:
-        1. Google Trends RSS filtrado por termos políticos (fonte primária)
-        2. Google News RSS de política
-        3. Análise de frequência de termos em notícias
+        Usa múltiplas fontes em ordem de prioridade:
+        1. Scraping da página do Google Trends categoria política (Playwright)
+        2. Google Trends RSS filtrado por termos políticos
+        3. Google News RSS de política
+        4. Análise de frequência de termos em notícias
         
         Args:
             max_topics: Número máximo de topics a retornar
+            use_scraping: Se True, tenta usar scraping com Playwright como fonte primária
             
         Returns:
             Lista de trending topics com rank, título e descrição contextual
         """
         logger.info("Identificando trending topics políticos")
+        
+        # FONTE 0: Scraping da página do Google Trends com categoria política (mais precisa)
+        if use_scraping and PLAYWRIGHT_AVAILABLE:
+            logger.info("Tentando scraping do Google Trends (categoria política)...")
+            scrape_topics = await self._scrape_google_trends_politics(max_topics)
+            
+            if scrape_topics and len(scrape_topics) >= 3:
+                topics = []
+                for rank, topic in enumerate(scrape_topics, 1):
+                    topics.append({
+                        "rank": rank,
+                        "title": topic["title"],
+                        "subtitle": topic.get("subtitle", f"Em alta - {topic.get('traffic', 'N/A')} buscas")
+                    })
+                
+                logger.info(f"Usando {len(topics)} trending políticos do scraping Google Trends")
+                return topics
+            else:
+                logger.info("Scraping retornou poucos resultados, tentando RSS...")
         
         # FONTE 1: Google Trends RSS filtrado por política (só usa se tiver pelo menos 5 topics)
         google_trends_topics = await self._fetch_google_trends_political(max_topics)
@@ -439,7 +569,7 @@ class TrendingCollector:
                     "subtitle": topic["subtitle"]
                 })
             
-            logger.info(f"Usando {len(topics)} trending políticos do Google Trends")
+            logger.info(f"Usando {len(topics)} trending políticos do Google Trends RSS")
             return topics
         
         # FONTE 2/3: Google News RSS + análise de frequência
@@ -833,13 +963,18 @@ class TwitterTrendingCollector:
 class GoogleTrendingCollector:
     """
     Coleta trending topics do Google Trends Brasil.
-    Usa múltiplas fontes: RSS do Google Trends, pytrends, e scraping como fallback.
+    Usa múltiplas fontes em ordem de prioridade:
+    1. Scraping da página do Google Trends (Playwright) - fonte primária
+    2. RSS do Google Trends
+    3. pytrends trending_searches
     """
     
     def __init__(self):
         self._pytrend: Optional['TrendReq'] = None
-        # URL do RSS de trending do Google (mais confiável que pytrends)
+        # URL do RSS de trending do Google
         self.rss_url = "https://trends.google.com.br/trending/rss?geo=BR"
+        # URL da página para scraping
+        self.scrape_url = "https://trends.google.com.br/trending?geo=BR"
     
     @property
     def disponivel(self) -> bool:
@@ -857,6 +992,107 @@ class GoogleTrendingCollector:
                 timeout=(10, 25)
             )
         return self._pytrend
+    
+    async def _scrape_google_trends(self, max_topics: int = 15) -> List[Dict[str, Any]]:
+        """
+        Faz scraping da página de trending topics do Google Trends Brasil.
+        Usa Playwright para renderizar JavaScript.
+        URL: https://trends.google.com.br/trending?geo=BR
+        """
+        if not PLAYWRIGHT_AVAILABLE:
+            logger.warning("Playwright não disponível para scraping do Google Trends geral")
+            return []
+        
+        topics = []
+        
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                context = await browser.new_context(
+                    locale='pt-BR',
+                    timezone_id='America/Sao_Paulo',
+                    user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+                )
+                page = await context.new_page()
+                
+                try:
+                    logger.info(f"Scraping Google Trends geral: {self.scrape_url}")
+                    # Usa domcontentloaded em vez de networkidle para ser mais rápido
+                    await page.goto(self.scrape_url, wait_until='domcontentloaded', timeout=30000)
+                    
+                    # Aguarda a tabela carregar
+                    try:
+                        await page.wait_for_selector('table', timeout=20000)
+                    except:
+                        logger.warning("Tabela não encontrada no Google Trends geral")
+                    
+                    await asyncio.sleep(3)  # Aguarda JavaScript carregar dados
+                    
+                    # Script JavaScript para extrair dados
+                    extract_script = """
+                    () => {
+                        const topics = [];
+                        const rows = document.querySelectorAll('table tbody tr');
+                        
+                        rows.forEach((row, index) => {
+                            let titulo = '';
+                            const titleEl = row.querySelector('.mZ3RIc, .title, [data-title], a');
+                            if (titleEl) {
+                                titulo = titleEl.textContent.trim();
+                            } else {
+                                const cells = row.querySelectorAll('td, [role="cell"]');
+                                if (cells.length > 0) {
+                                    titulo = cells[0].textContent.trim();
+                                }
+                            }
+                            
+                            let buscas = 'N/A';
+                            const volumeEl = row.querySelector('.lqv0Cb, .volume, [data-volume]');
+                            if (volumeEl) {
+                                buscas = volumeEl.textContent.trim();
+                            } else {
+                                const cells = row.querySelectorAll('td, [role="cell"]');
+                                if (cells.length > 1) {
+                                    buscas = cells[1].textContent.trim();
+                                }
+                            }
+                            
+                            if (titulo && titulo.length > 1) {
+                                topics.push({
+                                    rank: index + 1,
+                                    title: titulo,
+                                    traffic: buscas
+                                });
+                            }
+                        });
+                        
+                        return topics.slice(0, 30);
+                    }
+                    """
+                    
+                    extracted = await page.evaluate(extract_script)
+                    
+                    if extracted:
+                        for item in extracted[:max_topics]:
+                            traffic = item.get("traffic", "N/A")
+                            subtitle = f"Buscas: {traffic}" if traffic and traffic != "N/A" else "Pesquisa em alta no Google Brasil"
+                            topics.append({
+                                "rank": item.get("rank", 0),
+                                "title": item.get("title", ""),
+                                "subtitle": subtitle
+                            })
+                        
+                        logger.info(f"Scraping Google geral: encontrados {len(topics)} trending")
+                    
+                except Exception as e:
+                    logger.error(f"Erro no scraping do Google Trends geral: {e}")
+                finally:
+                    await browser.close()
+                    
+        except Exception as e:
+            logger.error(f"Erro ao iniciar Playwright para Google Trends geral: {e}")
+        
+        return topics
     
     async def _fetch_rss_trending(self, max_topics: int = 10) -> List[Dict[str, Any]]:
         """
@@ -976,26 +1212,41 @@ class GoogleTrendingCollector:
         
         return topics
     
-    async def identificar_trending_topics(self, max_topics: int = 10) -> List[Dict[str, Any]]:
+    async def identificar_trending_topics(self, max_topics: int = 10, use_scraping: bool = True) -> List[Dict[str, Any]]:
         """
         Identifica os trending topics do Google Trends Brasil.
-        Usa múltiplas fontes com fallback:
-        1. RSS do Google Trends (mais confiável)
-        2. pytrends trending_searches
-        3. pytrends realtime_trending_searches
+        Usa múltiplas fontes em ordem de prioridade:
+        1. Scraping da página do Google Trends (Playwright) - fonte primária
+        2. RSS do Google Trends
+        3. pytrends trending_searches
         
         Args:
             max_topics: Número máximo de topics a retornar
+            use_scraping: Se True, tenta usar scraping com Playwright como fonte primária
             
         Returns:
             Lista de trending topics com rank, título e descrição
         """
         logger.info("Identificando trending topics do Google Trends")
         
-        # Tenta RSS primeiro (mais confiável)
-        topics = await self._fetch_rss_trending(max_topics)
+        topics = []
         
-        # Se RSS falhou, tenta pytrends
+        # FONTE 1: Scraping da página do Google Trends (mais precisa)
+        if use_scraping and PLAYWRIGHT_AVAILABLE:
+            logger.info("Tentando scraping do Google Trends geral...")
+            topics = await self._scrape_google_trends(max_topics)
+            
+            if topics and len(topics) >= 3:
+                logger.info(f"Usando {len(topics)} trending do scraping Google Trends")
+                return topics
+            else:
+                logger.info("Scraping retornou poucos resultados, tentando RSS...")
+        
+        # FONTE 2: RSS do Google Trends
+        if not topics:
+            topics = await self._fetch_rss_trending(max_topics)
+        
+        # FONTE 3: pytrends como fallback
         if not topics:
             logger.info("RSS falhou, tentando pytrends como fallback")
             topics = await self._fetch_pytrends_trending(max_topics)
