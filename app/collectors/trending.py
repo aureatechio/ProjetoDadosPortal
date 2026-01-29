@@ -25,8 +25,8 @@ logger = logging.getLogger(__name__)
 class TrendingCollector:
     """
     Coleta e identifica trending topics políticos baseado em:
-    1. Google News RSS de política Brasil (fonte primária)
-    2. Frequência de termos nas notícias coletadas
+    1. Google Trends RSS filtrado por termos políticos (fonte primária)
+    2. Google News RSS de política Brasil
     3. GNews como fallback
     """
     
@@ -34,12 +34,41 @@ class TrendingCollector:
         self.gnews = GNews(language="pt", country="BR", max_results=50)
         self.analyzer = ContentAnalyzer()
         
+        # URL do RSS do Google Trends (geral, será filtrado por termos políticos)
+        self.google_trends_rss = "https://trends.google.com.br/trending/rss?geo=BR"
+        
         # URLs de RSS do Google News para política
         self.rss_urls = [
             "https://news.google.com/rss/search?q=política+brasil+governo&hl=pt-BR&gl=BR&ceid=BR:pt-419",
             "https://news.google.com/rss/search?q=congresso+câmara+senado&hl=pt-BR&gl=BR&ceid=BR:pt-419",
             "https://news.google.com/rss/search?q=lula+bolsonaro+eleição&hl=pt-BR&gl=BR&ceid=BR:pt-419",
         ]
+        
+        # Palavras-chave para identificar trending político
+        self.political_keywords = {
+            # Políticos brasileiros famosos
+            'lula', 'bolsonaro', 'tarcísio', 'haddad', 'ciro', 'simone tebet', 'marina silva',
+            'flávio bolsonaro', 'eduardo bolsonaro', 'carlos bolsonaro', 'michelle bolsonaro',
+            'lira', 'pacheco', 'moraes', 'barroso', 'mendonça', 'dino', 'zanin',
+            'nikolas ferreira', 'kim kataguiri', 'tabata amaral', 'erika hilton',
+            'pablo marçal', 'guilherme boulos', 'datena', 'nunes',
+            # Partidos
+            'pt', 'pl', 'mdb', 'pp', 'psd', 'psdb', 'psol', 'novo', 'republicanos', 'união brasil',
+            # Instituições
+            'stf', 'tse', 'trf', 'mpf', 'pgr', 'tcu', 'cgu', 'pf', 'polícia federal',
+            'congresso', 'senado', 'câmara', 'planalto', 'governo federal',
+            # Termos políticos
+            'eleição', 'eleições', 'candidato', 'candidatura', 'votação', 'urna',
+            'impeachment', 'cassação', 'inelegível', 'inelegibilidade',
+            'cpi', 'comissão', 'investigação', 'indiciamento', 'denúncia',
+            'reforma', 'pec', 'projeto de lei', 'mp', 'medida provisória',
+            'orçamento', 'arcabouço fiscal', 'dívida pública',
+            'ministro', 'ministério', 'secretário', 'governador', 'prefeito',
+            'pesquisa eleitoral', 'datafolha', 'quaest', 'ipec', 'atlas',
+            # Contextos políticos
+            'golpe', 'golpista', '8 de janeiro', 'atos antidemocráticos',
+            'anistia', 'indulto', 'prisão', 'condenação', 'absolvição',
+        }
         
         # Palavras a ignorar (stop words políticas)
         self.stop_words = {
@@ -125,6 +154,116 @@ class TrendingCollector:
                 entities.append(match)
         
         return entities
+    
+    def _is_political_topic(self, title: str, news_titles: List[str] = None) -> bool:
+        """
+        Verifica se um trending topic é relacionado a política.
+        O título do trending DEVE conter termos políticos (não apenas as notícias).
+        
+        Args:
+            title: Título do trending topic
+            news_titles: Lista de títulos de notícias relacionadas ao topic
+            
+        Returns:
+            True se o topic é político
+        """
+        title_lower = title.lower()
+        
+        # O título do trending deve conter termos políticos diretamente
+        # (não basta as notícias relacionadas mencionarem política)
+        for keyword in self.political_keywords:
+            kw_lower = keyword.lower()
+            if kw_lower in title_lower:
+                return True
+        
+        # Se o título não tem termo político, verifica se TODAS as notícias são políticas
+        # (indica que o topic é sobre política mesmo com título genérico)
+        if news_titles and len(news_titles) >= 2:
+            political_news_count = 0
+            for news_title in news_titles:
+                news_lower = news_title.lower()
+                for keyword in self.political_keywords:
+                    if keyword.lower() in news_lower:
+                        political_news_count += 1
+                        break
+            
+            # Pelo menos 50% das notícias devem ser políticas
+            if political_news_count >= len(news_titles) * 0.5:
+                return True
+        
+        return False
+    
+    async def _fetch_google_trends_political(self, max_topics: int = 10) -> List[Dict[str, Any]]:
+        """
+        Busca trending do Google Trends RSS e filtra apenas os políticos.
+        """
+        try:
+            import httpx
+            from xml.etree import ElementTree
+        except ImportError:
+            logger.warning("httpx não disponível para RSS")
+            return []
+        
+        topics = []
+        
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(
+                    self.google_trends_rss,
+                    headers={
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                    }
+                )
+                response.raise_for_status()
+                
+                # Parse XML
+                root = ElementTree.fromstring(response.text)
+                ns = {'ht': 'https://trends.google.com/trending/rss'}
+                
+                items = root.findall('.//item')
+                
+                for item in items:
+                    title_elem = item.find('title')
+                    traffic_elem = item.find('ht:approx_traffic', ns)
+                    
+                    if title_elem is None or not title_elem.text:
+                        continue
+                    
+                    title = title_elem.text.strip()
+                    
+                    # Coleta títulos de notícias relacionadas
+                    news_titles = []
+                    for news_item in item.findall('ht:news_item', ns):
+                        news_title = news_item.find('ht:news_item_title', ns)
+                        if news_title is not None and news_title.text:
+                            news_titles.append(news_title.text.strip())
+                    
+                    # Verifica se é político
+                    if self._is_political_topic(title, news_titles):
+                        traffic = ""
+                        if traffic_elem is not None and traffic_elem.text:
+                            traffic = traffic_elem.text.strip()
+                        
+                        # Pega a primeira notícia como descrição
+                        subtitle = news_titles[0] if news_titles else f"Em alta no Google - {traffic} buscas"
+                        
+                        topics.append({
+                            "title": title,
+                            "subtitle": subtitle[:120] + "..." if len(subtitle) > 120 else subtitle,
+                            "traffic": traffic,
+                            "news_count": len(news_titles)
+                        })
+                        
+                        if len(topics) >= max_topics:
+                            break
+                
+                if topics:
+                    logger.info(f"Encontrados {len(topics)} trending políticos do Google Trends RSS")
+                    
+        except Exception as e:
+            logger.warning(f"Erro ao buscar Google Trends RSS para política: {e}")
+        
+        return topics
     
     async def _fetch_political_news_rss(self) -> List[Dict[str, Any]]:
         """
@@ -272,7 +411,12 @@ class TrendingCollector:
     
     async def identificar_trending_topics(self, max_topics: int = 10) -> List[Dict[str, Any]]:
         """
-        Identifica os principais trending topics políticos com descrições contextuais.
+        Identifica os principais trending topics políticos.
+        
+        Usa múltiplas fontes:
+        1. Google Trends RSS filtrado por termos políticos (fonte primária)
+        2. Google News RSS de política
+        3. Análise de frequência de termos em notícias
         
         Args:
             max_topics: Número máximo de topics a retornar
@@ -281,6 +425,29 @@ class TrendingCollector:
             Lista de trending topics com rank, título e descrição contextual
         """
         logger.info("Identificando trending topics políticos")
+        
+        # FONTE 1: Google Trends RSS filtrado por política (só usa se tiver pelo menos 5 topics)
+        google_trends_topics = await self._fetch_google_trends_political(max_topics)
+        
+        if google_trends_topics and len(google_trends_topics) >= 5:
+            # Se encontrou trending políticos suficientes no Google Trends, usa esses
+            topics = []
+            for rank, topic in enumerate(google_trends_topics, 1):
+                topics.append({
+                    "rank": rank,
+                    "title": topic["title"],
+                    "subtitle": topic["subtitle"]
+                })
+            
+            logger.info(f"Usando {len(topics)} trending políticos do Google Trends")
+            return topics
+        
+        # FONTE 2/3: Google News RSS + análise de frequência
+        # Usa quando Google Trends não tem trending políticos suficientes
+        if google_trends_topics:
+            logger.info(f"Apenas {len(google_trends_topics)} trending políticos no Google Trends (mínimo 5), usando Google News")
+        else:
+            logger.info("Nenhum trending político no Google Trends, usando Google News")
         
         # Busca notícias recentes
         noticias = await self._fetch_political_news()
@@ -354,7 +521,7 @@ class TrendingCollector:
                 "subtitle": description
             })
         
-        logger.info(f"Identificados {len(topics)} trending topics com descrições")
+        logger.info(f"Identificados {len(topics)} trending topics via Google News")
         
         return topics
     
