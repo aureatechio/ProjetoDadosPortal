@@ -1,11 +1,12 @@
 import type { InstagramPost } from '../types'
 
 // URL base da API
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+const API_BASE: string | undefined = import.meta.env.VITE_API_URL
 
 // Função para gerar URL do proxy de imagem
 function getProxyImageUrl(originalUrl: string | null | undefined): string | null {
   if (!originalUrl) return null
+  if (!API_BASE) return null
   return `${API_BASE}/proxy/image?url=${encodeURIComponent(originalUrl)}`
 }
 
@@ -31,7 +32,7 @@ export function InstagramCard({ post }: { post: InstagramPost }) {
   // Se for URL externa (CDN do Instagram), usa proxy (quando configurado) para contornar hotlinking/CORS.
   const imageUrl = isSupabaseStoragePublicUrl(originalImageUrl)
     ? originalImageUrl
-    : getProxyImageUrl(originalImageUrl)
+    : (getProxyImageUrl(originalImageUrl) || originalImageUrl)
   // Monta a URL do post
   const postUrl = post.post_url || (post.post_shortcode ? `https://www.instagram.com/p/${post.post_shortcode}/` : null)
   // Texto do post (caption ou conteudo)
