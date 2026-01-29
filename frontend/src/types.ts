@@ -10,6 +10,7 @@ export type Politico = {
   cidade?: string | null
   estado?: string | null
   funcao?: string | null
+  cpf?: string | null
 }
 
 export type Noticia = {

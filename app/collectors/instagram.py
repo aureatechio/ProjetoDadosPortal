@@ -11,6 +11,7 @@ from itertools import islice
 
 from app.config import settings
 from app.database import db
+from app.utils.storage import upload_image_from_url_async
 
 logger = logging.getLogger(__name__)
 
@@ -201,9 +202,24 @@ class InstagramCollector:
             reverse=True
         )[:top_n]
         
-        # Adiciona politico_id
+        # Upload das imagens para o Supabase Storage
         for post in posts_sorted:
             post["politico_id"] = politico_id
+            
+            # Upload do thumbnail para o storage
+            thumbnail_original = post.get("thumbnail_url")
+            if thumbnail_original:
+                try:
+                    shortcode = post.get("post_shortcode", "")
+                    storage_url = await upload_image_from_url_async(
+                        image_url=thumbnail_original,
+                        folder="instagram",
+                        filename=f"post_{shortcode}" if shortcode else None,
+                        fallback_to_original=True
+                    )
+                    post["thumbnail_url"] = storage_url
+                except Exception as e:
+                    logger.warning(f"Erro ao fazer upload de thumbnail do Instagram: {e}")
         
         logger.info(f"Coletados {len(posts_sorted)} posts de {username}")
         

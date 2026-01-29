@@ -34,12 +34,7 @@ export function PoliticoProcessualPage() {
   // Filtros de doações
   const [doacaoTipo, setDoacaoTipo] = useState<'feitas' | 'recebidas' | 'todas'>('todas')
 
-  // Consulta processual
-  const [consultando, setConsultando] = useState(false)
-  const [consultaResult, setConsultaResult] = useState<any>(null)
-  const [cpfInput, setCpfInput] = useState('')
-  const [cpfSaving, setCpfSaving] = useState(false)
-  const [cpfMsg, setCpfMsg] = useState<string | null>(null)
+  // Logs de consulta (apenas visualização)
   const [consultaLogs, setConsultaLogs] = useState<ConsultaLog[] | null>(null)
 
   async function loadPolitico() {
@@ -57,8 +52,6 @@ export function PoliticoProcessualPage() {
     try {
       const data = await portalApi.getResumoProcessual(politicoId)
       setResumo(data)
-      // Se já existe CPF (mascarado), não sobrescreve input; senão limpa mensagem
-      setCpfMsg(null)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Falha ao carregar resumo processual')
     } finally {
@@ -123,40 +116,6 @@ export function PoliticoProcessualPage() {
     }
   }
 
-  async function executarConsulta() {
-    setConsultando(true)
-    setConsultaResult(null)
-    try {
-      const result = await portalApi.executarConsultaProcessual(politicoId, ['TSE', 'TJSP', 'TRF3', 'DOE'])
-      setConsultaResult(result)
-      // Recarrega resumo após consulta
-      await loadResumo()
-      await loadConsultaLogs()
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Falha na consulta processual')
-    } finally {
-      setConsultando(false)
-    }
-  }
-
-  async function salvarCpf() {
-    const raw = cpfInput.trim()
-    if (!raw) return
-    setCpfSaving(true)
-    setCpfMsg(null)
-    try {
-      const res = await portalApi.atualizarCpfPolitico(politicoId, raw)
-      setCpfMsg(res.mensagem || 'CPF atualizado.')
-      setCpfInput('')
-      await loadResumo()
-      await loadConsultaLogs()
-    } catch (e) {
-      setCpfMsg(e instanceof Error ? e.message : 'Falha ao atualizar CPF')
-    } finally {
-      setCpfSaving(false)
-    }
-  }
-
   useEffect(() => {
     if (!Number.isFinite(politicoId)) return
     void loadPolitico()
@@ -208,71 +167,15 @@ export function PoliticoProcessualPage() {
             {resumo?.cpf && <span className="pill">CPF: {resumo.cpf}</span>}
           </div>
           <div className="stack gap-8" style={{ minWidth: 280 }}>
-            <div className="row gap-8 wrap">
-              <button className="btn primary" onClick={executarConsulta} disabled={consultando}>
-                {consultando ? 'Consultando...' : 'Atualizar Dados'}
-              </button>
-              <button className="btn secondary" onClick={() => void loadConsultaLogs()} disabled={consultando}>
-                Atualizar logs
-              </button>
-            </div>
-
-            {!resumo?.cpf ? (
-              <div className="card" style={{ padding: 10 }}>
-                <div className="card-title">Cadastrar CPF (para consulta)</div>
-                <div className="row gap-8 wrap" style={{ marginTop: 8 }}>
-                  <input
-                    className="input"
-                    value={cpfInput}
-                    onChange={(e) => setCpfInput(e.target.value)}
-                    placeholder="CPF (11 dígitos)"
-                    aria-label="CPF do político"
-                  />
-                  <button type="button" className="btn" onClick={() => void salvarCpf()} disabled={cpfSaving || !cpfInput.trim()}>
-                    {cpfSaving ? 'Salvando…' : 'Salvar'}
-                  </button>
-                </div>
-                {cpfMsg ? <div className="muted" style={{ marginTop: 8 }}>{cpfMsg}</div> : <div className="muted" style={{ marginTop: 8 }}>O CPF fica armazenado no banco (o resumo exibe mascarado).</div>}
-              </div>
-            ) : cpfMsg ? (
-              <div className="muted">{cpfMsg}</div>
-            ) : null}
+            <button className="btn secondary" onClick={() => void loadConsultaLogs()}>
+              Atualizar logs
+            </button>
+            <p className="muted" style={{ fontSize: '0.85rem' }}>
+              Dados coletados automaticamente pelo servidor Python.
+            </p>
           </div>
         </div>
       </section>
-
-      {/* Resultado da consulta */}
-      {consultaResult && (
-        <section className="card">
-          <h3>Resultado da Consulta</h3>
-          <p className="muted">Fontes consultadas: {consultaResult.fontes_consultadas?.join(', ')}</p>
-          
-          {consultaResult.urls_pendentes?.length > 0 && (
-            <div className="stack gap-8" style={{ marginTop: '12px' }}>
-              <strong>URLs para consulta manual (CAPTCHA necessário):</strong>
-              {consultaResult.urls_pendentes.map((item: any, idx: number) => (
-                <div key={idx} className="card" style={{ padding: '8px' }}>
-                  <strong>{item.fonte}</strong>
-                  {item.url && (
-                    <div>
-                      <a href={item.url} target="_blank" rel="noopener noreferrer" className="link">
-                        {item.url.substring(0, 80)}...
-                      </a>
-                    </div>
-                  )}
-                  {item.urls?.map((url: string, i: number) => (
-                    <div key={i}>
-                      <a href={url} target="_blank" rel="noopener noreferrer" className="link">
-                        {url.substring(0, 80)}...
-                      </a>
-                    </div>
-                  ))}
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-      )}
 
       {/* Tabs */}
       <div className="row gap-8 wrap">

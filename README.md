@@ -210,6 +210,10 @@ npm run dev
 
 Configuração da URL da API via `VITE_API_URL` (veja `frontend/env.example`).
 
+## Deploy (Vercel + DigitalOcean + GitHub)
+
+Veja o guia em `DEPLOY.md`.
+
 ## Tabelas do Banco de Dados
 
 - `politico` - Políticos cadastrados (com instagram_username, twitter_username, usar_diretoriaja, cidade, estado)

@@ -18,6 +18,7 @@ import time
 import httpx
 
 from app.database import get_supabase
+from app.utils.storage import upload_image_from_url
 
 logger = logging.getLogger(__name__)
 
@@ -214,6 +215,23 @@ class DivulgaCandContasCollector:
     
     def _parse_candidato(self, data: dict, eleicao: str, uf: str) -> Dict[str, Any]:
         """Parse básico de dados do candidato."""
+        # Upload da foto do candidato para o Supabase Storage
+        foto_original = data.get("fotoUrl", "")
+        url_foto = foto_original
+        if foto_original:
+            try:
+                cpf = self._normalizar_cpf(data.get("cpf", ""))
+                sequencial = data.get("id", "")
+                filename = f"candidato_{cpf}_{eleicao}" if cpf else f"candidato_{sequencial}_{eleicao}"
+                url_foto = upload_image_from_url(
+                    image_url=foto_original,
+                    folder="candidatos",
+                    filename=filename,
+                    fallback_to_original=True
+                )
+            except Exception as e:
+                logger.warning(f"Erro ao fazer upload de foto do candidato: {e}")
+        
         return {
             "sequencial_candidato": data.get("id", ""),
             "nome": data.get("nomeCompleto", ""),
@@ -225,7 +243,7 @@ class DivulgaCandContasCollector:
             "situacao_candidatura": data.get("descricaoSituacao", ""),
             "eleicao": eleicao,
             "uf": uf,
-            "url_foto": data.get("fotoUrl", ""),
+            "url_foto": url_foto,
         }
     
     def _parse_candidato_detalhado(self, data: dict, eleicao: str, uf: str) -> Dict[str, Any]:

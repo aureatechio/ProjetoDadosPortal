@@ -9,6 +9,7 @@ from newsapi import NewsApiClient
 from newsapi.newsapi_exception import NewsAPIException
 
 from app.config import settings
+from app.utils.storage import upload_image_from_url_async
 
 logger = logging.getLogger(__name__)
 
@@ -83,13 +84,26 @@ class NewsAPICollector:
             articles = response.get("articles", [])
             
             for article in articles:
+                # Upload da imagem para o Supabase Storage
+                imagem_original = article.get("urlToImage")
+                imagem_url = imagem_original
+                if imagem_original:
+                    try:
+                        imagem_url = await upload_image_from_url_async(
+                            image_url=imagem_original,
+                            folder="noticias",
+                            fallback_to_original=True
+                        )
+                    except Exception as e:
+                        logger.warning(f"Erro ao fazer upload de imagem de notícia: {e}")
+                
                 noticia = {
                     "titulo": article.get("title"),
                     "descricao": article.get("description"),
                     "conteudo_completo": article.get("content"),
                     "url": article.get("url"),
                     "fonte_nome": article.get("source", {}).get("name"),
-                    "imagem_url": article.get("urlToImage"),
+                    "imagem_url": imagem_url,
                     "publicado_em": self._parse_date(article.get("publishedAt")),
                 }
                 noticias.append(noticia)
@@ -238,13 +252,26 @@ class NewsAPICollector:
                 return []
             
             for article in response.get("articles", []):
+                # Upload da imagem para o Supabase Storage
+                imagem_original = article.get("urlToImage")
+                imagem_url = imagem_original
+                if imagem_original:
+                    try:
+                        imagem_url = await upload_image_from_url_async(
+                            image_url=imagem_original,
+                            folder="noticias",
+                            fallback_to_original=True
+                        )
+                    except Exception as e:
+                        logger.warning(f"Erro ao fazer upload de imagem de headline: {e}")
+                
                 noticia = {
                     "titulo": article.get("title"),
                     "descricao": article.get("description"),
                     "conteudo_completo": article.get("content"),
                     "url": article.get("url"),
                     "fonte_nome": article.get("source", {}).get("name"),
-                    "imagem_url": article.get("urlToImage"),
+                    "imagem_url": imagem_url,
                     "publicado_em": self._parse_date(article.get("publishedAt")),
                     "tipo": "geral"
                 }

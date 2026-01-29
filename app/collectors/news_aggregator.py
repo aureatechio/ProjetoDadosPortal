@@ -6,12 +6,13 @@ import asyncio
 import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
 from app.collectors.news_google import GoogleNewsCollector
 from app.collectors.news_api import NewsAPICollector
 from app.relevance.engine import RelevanceEngine
 from app.database import db
+from app.utils.storage import upload_image_from_url_async
 
 logger = logging.getLogger(__name__)
 
@@ -100,11 +101,157 @@ class NewsAggregator:
         
         try:
             parsed = urlparse(url)
+
+            # Se vier encapsulada pelo Google News, tenta extrair a URL real
+            # (algumas variantes usam ?url=... ou ?q=...)
+            if parsed.netloc and "news.google." in parsed.netloc.lower():
+                qs = parse_qs(parsed.query or "")
+                real = (qs.get("url") or qs.get("q") or qs.get("u") or [None])[0]
+                if isinstance(real, str) and real.startswith("http"):
+                    parsed = urlparse(real)
+
             # Remove parâmetros de tracking comuns
             clean_path = parsed.path.rstrip("/")
-            return f"{parsed.netloc}{clean_path}".lower()
+            netloc = (parsed.netloc or "").lower()
+            if netloc.startswith("www."):
+                netloc = netloc[4:]
+            return f"{netloc}{clean_path}".lower()
         except Exception:
             return url.lower()
+
+    def _extract_domain(self, url: str) -> str:
+        """
+        Extrai domínio canônico (portal) de uma URL.
+        """
+        if not url:
+            return ""
+        try:
+            parsed = urlparse(url)
+            netloc = (parsed.netloc or "").lower()
+            if netloc.startswith("www."):
+                netloc = netloc[4:]
+            return netloc
+        except Exception:
+            return ""
+
+    def _as_datetime(self, value: Any) -> Optional[datetime]:
+        """
+        Converte datetime/string em datetime (UTC quando possível).
+        """
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                return value.replace(tzinfo=timezone.utc)
+            return value
+        if isinstance(value, str) and value.strip():
+            s = value.strip()
+            try:
+                dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt
+            except Exception:
+                return None
+        return None
+
+    def _select_latest_unique_portals(self, noticias: List[Dict[str, Any]], limit: int = 5) -> List[Dict[str, Any]]:
+        """
+        Seleciona no máximo `limit` notícias, priorizando:
+        - mais recentes (publicado_em desc)
+        - no máximo 1 por portal (domínio)
+        - sem duplicatas (URL normalizada)
+        """
+        if not noticias:
+            return []
+
+        def sort_key(n: Dict[str, Any]) -> datetime:
+            dt = self._as_datetime(n.get("publicado_em"))
+            return dt or datetime.min.replace(tzinfo=timezone.utc)
+
+        ordered = sorted(noticias, key=sort_key, reverse=True)
+
+        out: List[Dict[str, Any]] = []
+        seen_domains = set()
+        seen_urls = set()
+
+        for n in ordered:
+            url = (n.get("url") or "").strip()
+            if not url:
+                continue
+
+            norm = self._normalize_url(url)
+            if norm in seen_urls:
+                continue
+
+            domain = self._extract_domain(url)
+            if domain and domain in seen_domains:
+                continue
+
+            seen_urls.add(norm)
+            if domain:
+                seen_domains.add(domain)
+
+            out.append(n)
+            if len(out) >= int(limit):
+                break
+
+        return out
+
+    async def _ensure_full_content_for_selected(self, noticias: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Para as notícias finais (já filtradas), garante que `conteudo_completo` exista.
+        Também tenta preencher `imagem_url`/`publicado_em` quando faltantes.
+        """
+        if not noticias:
+            return noticias
+
+        to_fetch: List[tuple[int, str]] = []
+        for idx, n in enumerate(noticias):
+            url = (n.get("url") or "").strip()
+            conteudo = (n.get("conteudo_completo") or "").strip() if isinstance(n.get("conteudo_completo"), str) else (n.get("conteudo_completo") or "")
+            if url and not conteudo:
+                to_fetch.append((idx, url))
+
+        if not to_fetch:
+            return noticias
+
+        async def _fetch(url: str) -> Dict[str, Any]:
+            return await self.google_collector.extrair_conteudo_artigo(url)
+
+        results = await asyncio.gather(*[_fetch(url) for _, url in to_fetch], return_exceptions=True)
+
+        for (idx, _url), res in zip(to_fetch, results):
+            if isinstance(res, Exception) or not isinstance(res, dict):
+                continue
+
+            # Preenche apenas se vier válido
+            if res.get("conteudo_completo"):
+                noticias[idx]["conteudo_completo"] = res.get("conteudo_completo")
+
+            # publicado_em: só preenche se estiver faltando
+            if not noticias[idx].get("publicado_em") and res.get("publicado_em"):
+                noticias[idx]["publicado_em"] = res.get("publicado_em")
+
+            # imagem_url: se vier do artigo, salva no storage e grava a URL pública
+            img = (res.get("imagem_url") or "").strip() if isinstance(res.get("imagem_url"), str) else ""
+            if img and not noticias[idx].get("imagem_url"):
+                try:
+                    noticias[idx]["imagem_url"] = await upload_image_from_url_async(
+                        image_url=img,
+                        folder="noticias",
+                        fallback_to_original=True,
+                    )
+                except Exception:
+                    noticias[idx]["imagem_url"] = img
+
+            # titulo/descricao: preenche se estiver faltando
+            if not noticias[idx].get("titulo") and res.get("titulo"):
+                noticias[idx]["titulo"] = res.get("titulo")
+            if not noticias[idx].get("descricao") and res.get("descricao"):
+                noticias[idx]["descricao"] = res.get("descricao")
+
+        return noticias
     
     def _remove_duplicates(self, noticias: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
@@ -275,17 +422,19 @@ class NewsAggregator:
                 todas_noticias.extend(result)
         
         noticias_unicas = self._remove_duplicates(todas_noticias)
-        
-        # Processa relevância (sem nome de político específico)
-        noticias_processadas = self.relevance_engine.processar_noticias(noticias_unicas)
-        
-        for noticia in noticias_processadas:
+
+        # Enriquecimento: calcula scores (sem ordenar por relevância) e seleciona por recência/portal
+        noticias_com_scores = self.relevance_engine.processar_noticias(noticias_unicas)
+        noticias_selecionadas = self._select_latest_unique_portals(noticias_com_scores, limit=5)
+        noticias_selecionadas = await self._ensure_full_content_for_selected(noticias_selecionadas)
+
+        for noticia in noticias_selecionadas:
             noticia["tipo"] = "cidade"
             noticia["cidade"] = cidade
         
-        logger.info(f"Coletadas {len(noticias_processadas)} notícias de {cidade}")
+        logger.info(f"Coletadas {len(noticias_selecionadas)} notícias de {cidade}")
         
-        return noticias_processadas
+        return noticias_selecionadas
     
     async def coletar_noticias_politicas_gerais(self) -> List[Dict[str, Any]]:
         """
@@ -313,14 +462,18 @@ class NewsAggregator:
                 todas_noticias.extend(result)
         
         noticias_unicas = self._remove_duplicates(todas_noticias)
-        noticias_processadas = self.relevance_engine.processar_noticias(noticias_unicas)
-        
-        for noticia in noticias_processadas:
+
+        # Enriquecimento: calcula scores e seleciona por recência/portal (máx 5)
+        noticias_com_scores = self.relevance_engine.processar_noticias(noticias_unicas)
+        noticias_selecionadas = self._select_latest_unique_portals(noticias_com_scores, limit=5)
+        noticias_selecionadas = await self._ensure_full_content_for_selected(noticias_selecionadas)
+
+        for noticia in noticias_selecionadas:
             noticia["tipo"] = "geral"
         
-        logger.info(f"Coletadas {len(noticias_processadas)} notícias políticas gerais")
+        logger.info(f"Coletadas {len(noticias_selecionadas)} notícias políticas gerais")
         
-        return noticias_processadas
+        return noticias_selecionadas
     
     async def coletar_noticias_estado(
         self,
@@ -354,15 +507,19 @@ class NewsAggregator:
                 todas_noticias.extend(result)
         
         noticias_unicas = self._remove_duplicates(todas_noticias)
-        noticias_processadas = self.relevance_engine.processar_noticias(noticias_unicas)
-        
-        for noticia in noticias_processadas:
+
+        # Enriquecimento: calcula scores e seleciona por recência/portal (máx 5)
+        noticias_com_scores = self.relevance_engine.processar_noticias(noticias_unicas)
+        noticias_selecionadas = self._select_latest_unique_portals(noticias_com_scores, limit=5)
+        noticias_selecionadas = await self._ensure_full_content_for_selected(noticias_selecionadas)
+
+        for noticia in noticias_selecionadas:
             noticia["tipo"] = "estado"
             noticia["estado"] = estado
         
-        logger.info(f"Coletadas {len(noticias_processadas)} notícias de {estado}")
+        logger.info(f"Coletadas {len(noticias_selecionadas)} notícias de {estado}")
         
-        return noticias_processadas
+        return noticias_selecionadas
     
     async def executar_coleta_completa(self) -> Dict[str, int]:
         """
@@ -401,7 +558,7 @@ class NewsAggregator:
                     if not nome:
                         continue
                     
-                    # Se cidade não preenchida, usa a capital do estado
+                    # Se cidade não preenchida, usa a capital do estado (para notícias do político)
                     if not cidade and estado:
                         cidade = self._get_capital_estado(estado)
                         logger.info(f"Usando capital {cidade} para {nome} ({estado})")
@@ -439,15 +596,15 @@ class NewsAggregator:
                             stats["estados"] += inserted
                         estados_processados.add(estado)
                     
-                    # Coleta notícias da cidade/capital (baseado no escopo)
-                    # Usa a capital do estado se cidade não estiver preenchida
-                    if escopo.get("cidade") and cidade and cidade not in cidades_processadas:
-                        noticias_cidade = await self.coletar_noticias_cidade(cidade, estado)
+                    # Coleta notícias da CIDADE (sempre a CAPITAL do estado quando existir)
+                    cidade_capital = self._get_capital_estado(estado) if estado else cidade
+                    if escopo.get("cidade") and cidade_capital and cidade_capital not in cidades_processadas:
+                        noticias_cidade = await self.coletar_noticias_cidade(cidade_capital, estado)
                         if noticias_cidade:
                             noticias_cidade_serializadas = [self._serialize_for_db(n) for n in noticias_cidade]
                             inserted = db.insert_noticias_batch(noticias_cidade_serializadas)
                             stats["cidades"] += inserted
-                        cidades_processadas.add(cidade)
+                        cidades_processadas.add(cidade_capital)
                     
                     # Marca se precisa coletar notícias do Brasil
                     if escopo.get("brasil"):

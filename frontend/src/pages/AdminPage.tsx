@@ -1,37 +1,20 @@
 import { useEffect, useState } from 'react'
 import { portalApi } from '../api/portalApi'
-import type { ColetaLog, ScheduledJob } from '../types'
+import type { ColetaLog } from '../types'
 import { Loading } from '../components/Loading'
 import { ErrorState } from '../components/ErrorState'
 
-type ColetaTipo =
-  | 'completa'
-  | 'noticias'
-  | 'instagram'
-  | 'trending'
-  | 'trending_twitter'
-  | 'trending_google'
-  | 'socials'
-  | 'social_mentions'
-  | 'processual_tse'
-
 export function AdminPage() {
-  const [jobs, setJobs] = useState<ScheduledJob[] | null>(null)
   const [logs, setLogs] = useState<ColetaLog[] | null>(null)
-  const [tipo, setTipo] = useState<ColetaTipo>('completa')
-  const [dryRun, setDryRun] = useState(false)
-  const [running, setRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [lastMsg, setLastMsg] = useState<string | null>(null)
 
   async function load() {
     setError(null)
     try {
-      const [j, l] = await Promise.all([portalApi.getColetaJobs(), portalApi.getColetaLogs(50)])
-      setJobs(j)
+      const l = await portalApi.getColetaLogs(100)
       setLogs(l)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Falha ao carregar admin')
+      setError(e instanceof Error ? e.message : 'Falha ao carregar logs')
     }
   }
 
@@ -40,91 +23,39 @@ export function AdminPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  async function runColeta() {
-    setRunning(true)
-    setLastMsg(null)
-    setError(null)
-    try {
-      const res = await portalApi.executarColeta(tipo, tipo === 'socials' ? dryRun : false)
-      setLastMsg(res.mensagem)
-      await load()
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Falha ao iniciar coleta')
-    } finally {
-      setRunning(false)
-    }
-  }
-
   if (error) return <ErrorState message={error} onRetry={load} />
-  if (!jobs || !logs) return <Loading label="Carregando admin…" />
+  if (!logs) return <Loading label="Carregando logs…" />
 
   return (
     <div className="stack gap-16">
       <section className="hero">
         <h1>Admin</h1>
-        <p className="muted">Executar coleta manual e acompanhar jobs/logs.</p>
+        <p className="muted">Visualização dos logs de coleta. As coletas são executadas automaticamente no servidor Python.</p>
       </section>
 
       <section className="card">
-        <div className="card-title">Executar coleta manual</div>
-        <div className="row gap-12 wrap">
-          <label className="field">
-            <span className="muted">Tipo</span>
-            <select className="input" value={tipo} onChange={(e) => setTipo(e.target.value as ColetaTipo)}>
-              <option value="completa">completa</option>
-              <option value="noticias">noticias</option>
-              <option value="instagram">instagram</option>
-              <option value="trending">trending (política + Twitter + Google)</option>
-              <option value="trending_twitter">trending_twitter (Twitter/X)</option>
-              <option value="trending_google">trending_google (Google)</option>
-              <option value="socials">socials</option>
-              <option value="social_mentions">social_mentions</option>
-              <option value="processual_tse">processual_tse</option>
-            </select>
-          </label>
-
-          {tipo === 'socials' ? (
-            <div className="field">
-              <span className="muted">Dry-run</span>
-              <label className="row gap-8">
-                <input type="checkbox" checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} />
-                <span className="muted">não grava no banco</span>
-              </label>
-            </div>
-          ) : null}
-
-          <button type="button" className="btn" onClick={() => void runColeta()} disabled={running}>
-            {running ? 'Iniciando…' : 'Executar'}
-          </button>
-
-          <button type="button" className="btn secondary" onClick={() => void load()} disabled={running}>
-            Atualizar
+        <div className="row space-between gap-12 wrap">
+          <div>
+            <div className="card-title">Servidor de Coletas</div>
+            <p className="muted" style={{ marginTop: 4 }}>
+              Os jobs de coleta rodam em servidor separado (Digital Ocean).
+              <br />
+              Para executar coletas manuais, acesse o servidor Python diretamente.
+            </p>
+          </div>
+          <button type="button" className="btn secondary" onClick={() => void load()}>
+            Atualizar logs
           </button>
         </div>
-
-        {lastMsg ? <div className="muted">Resposta: {lastMsg}</div> : null}
       </section>
 
-      <section className="grid two">
-        <div className="card">
-          <div className="card-title">Jobs agendados</div>
-          <div className="list">
-            {jobs.map((j) => (
-              <div key={j.id} className="list-row">
-                <div className="grow">
-                  <div className="item-title">{j.name}</div>
-                  <div className="muted">id: {j.id}</div>
-                </div>
-                <div className="pill">{j.next_run ? formatDateTime(j.next_run) : '—'}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div className="card">
-          <div className="card-title">Logs recentes</div>
-          <div className="list">
-            {logs.map((l) => (
+      <section className="card">
+        <div className="card-title">Logs de Coleta ({logs.length} registros)</div>
+        <div className="list" style={{ maxHeight: 600, overflowY: 'auto' }}>
+          {logs.length === 0 ? (
+            <div className="muted" style={{ padding: 16 }}>Nenhum log encontrado.</div>
+          ) : (
+            logs.map((l) => (
               <div key={l.id} className="list-row">
                 <div className="grow">
                   <div className="item-title">
@@ -136,7 +67,58 @@ export function AdminPage() {
                 </div>
                 <div className="pill">{l.iniciado_em ? formatDateTime(l.iniciado_em) : '—'}</div>
               </div>
-            ))}
+            ))
+          )}
+        </div>
+      </section>
+
+      <section className="card">
+        <div className="card-title">Jobs Agendados no Servidor</div>
+        <p className="muted" style={{ marginTop: 4 }}>
+          Os jobs são gerenciados pelo APScheduler no servidor Python:
+        </p>
+        <div className="list" style={{ marginTop: 12 }}>
+          <div className="list-row">
+            <div className="grow">
+              <div className="item-title">Coleta de Notícias</div>
+              <div className="muted">Google News + NewsAPI</div>
+            </div>
+            <div className="pill">06:00</div>
+          </div>
+          <div className="list-row">
+            <div className="grow">
+              <div className="item-title">Coleta Instagram</div>
+              <div className="muted">Posts mais engajados</div>
+            </div>
+            <div className="pill">06:45</div>
+          </div>
+          <div className="list-row">
+            <div className="grow">
+              <div className="item-title">Coleta Menções Sociais</div>
+              <div className="muted">BlueSky, Google Trends</div>
+            </div>
+            <div className="pill">07:00</div>
+          </div>
+          <div className="list-row">
+            <div className="grow">
+              <div className="item-title">Coleta Trending Topics</div>
+              <div className="muted">Política + Twitter + Google</div>
+            </div>
+            <div className="pill">08:00</div>
+          </div>
+          <div className="list-row">
+            <div className="grow">
+              <div className="item-title">Limpeza de Dados</div>
+              <div className="muted">Remove dados antigos</div>
+            </div>
+            <div className="pill">08:15</div>
+          </div>
+          <div className="list-row">
+            <div className="grow">
+              <div className="item-title">Coleta Processual TSE</div>
+              <div className="muted">Candidaturas, doações, filiações</div>
+            </div>
+            <div className="pill">Dom 03:00</div>
           </div>
         </div>
       </section>

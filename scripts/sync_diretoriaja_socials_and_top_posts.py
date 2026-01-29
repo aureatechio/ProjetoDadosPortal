@@ -17,9 +17,11 @@ Actors padrão:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,6 +34,14 @@ try:
     from dotenv import load_dotenv
 except Exception:  # pragma: no cover
     load_dotenv = None
+
+# Configurações de storage
+DEFAULT_BUCKET = "portal"
+DOWNLOAD_TIMEOUT = 30.0
+IMAGE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+}
 
 
 TITLE_PREFIXES = (
@@ -58,6 +68,113 @@ BR_HINT_RE = re.compile(r"\b(brasil|brasileir|br)\b", re.I)
 def ensure_env_loaded(project_root: Path) -> None:
     if load_dotenv is not None:
         load_dotenv(project_root / ".env", override=False)
+
+
+# ============ Funções de Upload para Supabase Storage ============
+
+def _guess_content_type(url: str, response: httpx.Response) -> str:
+    """Determina o content-type da imagem."""
+    ct = (response.headers.get("content-type") or "").split(";")[0].strip().lower()
+    if ct.startswith("image/"):
+        return ct
+    url_lower = url.lower()
+    if ".png" in url_lower:
+        return "image/png"
+    if ".webp" in url_lower:
+        return "image/webp"
+    if ".gif" in url_lower:
+        return "image/gif"
+    return "image/jpeg"
+
+
+def _ext_from_content_type(ct: str) -> str:
+    """Retorna extensão baseada no content-type."""
+    if "png" in ct:
+        return "png"
+    if "webp" in ct:
+        return "webp"
+    if "gif" in ct:
+        return "gif"
+    return "jpg"
+
+
+def _is_already_in_storage(url: str, bucket: str = DEFAULT_BUCKET) -> bool:
+    """Verifica se a URL já aponta para o Supabase Storage."""
+    if not url:
+        return False
+    return f"/storage/v1/object/public/{bucket}/" in url
+
+
+def upload_image_to_storage(
+    supabase: Any,
+    image_url: str,
+    folder: str,
+    filename: str,
+    bucket: str = DEFAULT_BUCKET,
+    http_client: Optional[httpx.Client] = None,
+) -> Optional[str]:
+    """
+    Baixa uma imagem de URL externa e faz upload para o Supabase Storage.
+    
+    Args:
+        supabase: Cliente Supabase
+        image_url: URL da imagem a ser baixada
+        folder: Pasta no bucket (ex: "politicos", "instagram")
+        filename: Nome do arquivo (sem extensão)
+        bucket: Nome do bucket
+        http_client: Cliente HTTP opcional (se None, cria um novo)
+        
+    Returns:
+        URL pública do Storage ou a URL original em caso de erro
+    """
+    if not image_url:
+        return None
+    
+    # Verifica se já está no storage
+    if _is_already_in_storage(image_url, bucket):
+        return image_url
+    
+    try:
+        # Download da imagem
+        if http_client:
+            response = http_client.get(image_url, timeout=DOWNLOAD_TIMEOUT)
+        else:
+            with httpx.Client(timeout=DOWNLOAD_TIMEOUT, follow_redirects=True, headers=IMAGE_HEADERS) as client:
+                response = client.get(image_url)
+        
+        response.raise_for_status()
+        image_data = response.content
+        
+        if not image_data:
+            return image_url
+        
+        content_type = _guess_content_type(image_url, response)
+        ext = _ext_from_content_type(content_type)
+        
+        # Gera hash para unicidade
+        url_hash = hashlib.md5(image_url.encode()).hexdigest()[:8]
+        safe_filename = f"{filename}_{url_hash}.{ext}"
+        path = f"{folder}/{safe_filename}"
+        
+        # Upload para o storage
+        with tempfile.NamedTemporaryFile(delete=True, suffix=f".{ext}") as tmp:
+            tmp.write(image_data)
+            tmp.flush()
+            
+            supabase.storage.from_(bucket).upload(
+                path,
+                tmp.name,
+                {"content-type": content_type, "upsert": "true"},
+            )
+        
+        # Retorna URL pública
+        public_url = supabase.storage.from_(bucket).get_public_url(path)
+        return public_url
+        
+    except Exception as e:
+        # Em caso de erro, retorna URL original
+        print(f"[WARN] Erro ao fazer upload de imagem {image_url}: {e}")
+        return image_url
 
 
 def looks_empty(v: Any) -> bool:
@@ -422,7 +539,15 @@ def main() -> None:
                     if missing_img:
                         pic = extract_profile_pic(best_item)
                         if pic:
-                            chosen_img = pic
+                            # Upload da foto de perfil para o Supabase Storage
+                            ig_username = extract_instagram_username(best_item) or f"politico_{pid}"
+                            chosen_img = upload_image_to_storage(
+                                supabase=supabase,
+                                image_url=pic,
+                                folder="politicos",
+                                filename=f"{pid}_{ig_username}",
+                                http_client=h,
+                            )
                     if missing_tw:
                         inferred = infer_twitter_from_instagram_item(h, best_item)
                         if inferred:
@@ -572,6 +697,19 @@ def main() -> None:
 
                     if args.apply and top_rows:
                         for r in top_rows:
+                            # Upload do thumbnail para o Supabase Storage
+                            media_url_original = r.get("media_url")
+                            media_url = media_url_original
+                            if media_url_original:
+                                post_id = r.get("post_id", "")
+                                media_url = upload_image_to_storage(
+                                    supabase=supabase,
+                                    image_url=media_url_original,
+                                    folder="instagram",
+                                    filename=f"post_{post_id}" if post_id else f"post_{ig_user}",
+                                    http_client=h,
+                                )
+                            
                             row = {
                                 "politico_id": puuid,
                                 "plataforma": "instagram",
@@ -584,7 +722,7 @@ def main() -> None:
                                 "views": 0,
                                 "engagement_score": float(r.get("engagement_score") or 0),
                                 "media_type": r.get("media_type"),
-                                "media_url": r.get("media_url"),
+                                "media_url": media_url,
                                 "posted_at": r.get("posted_at"),
                                 "metadata": {
                                     "source": "apify",

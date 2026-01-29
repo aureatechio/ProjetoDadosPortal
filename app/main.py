@@ -352,15 +352,18 @@ async def get_social_posts(
 async def get_social_mentions(
     politico_id: int,
     plataforma: Optional[str] = Query(default=None, regex="^(bluesky|twitter|google_trends|google_search)$"),
-    limit: int = Query(default=50, ge=1, le=200),
+    limit: int = Query(default=8, ge=1, le=8),
 ):
     """
     Retorna menções (sobre o político) coletadas de redes sociais, ordenadas por engajamento.
+    Por padrão, retorna apenas menções recentes (últimos 7 dias).
     
     - **politico_id**: ID do político
     - **plataforma**: Filtro por plataforma (bluesky, twitter, google_trends, google_search)
-    - **limit**: Número máximo de menções
+    - **limit**: Número máximo de menções (máx: 8)
     """
+    # Regra do produto: retornar somente as 8 com maior engajamento
+    limit = min(int(limit or 8), 8)
     mentions = db.get_social_mentions_politico(politico_id, plataforma=plataforma, limit=limit)
     return mentions
 

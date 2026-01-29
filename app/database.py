@@ -896,23 +896,30 @@ class Database:
         self, 
         politico_id: int, 
         plataforma: str = None,
-        limit: int = 50
+        limit: int = 8
     ) -> List[Dict[str, Any]]:
         """Retorna menções sociais de um político ordenadas por engajamento"""
         # Converte ID inteiro para UUID
         politico_uuid = self.get_politico_uuid(politico_id)
         if not politico_uuid:
             return []
+
+        # Regra do produto: no máximo 8 menções retornadas (top por engajamento)
+        limit = max(1, min(int(limit or 8), 8))
+        # Regra do produto: trazer sempre menções recentes (evita retornar itens muito antigos)
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
         
         query = self.client.table("social_mentions")\
             .select("*")\
-            .eq("politico_id", politico_uuid)
+            .eq("politico_id", politico_uuid)\
+            .gte("collected_at", cutoff)
         
         if plataforma:
             query = query.eq("plataforma", plataforma)
         
         response = query\
             .order("engagement_score", desc=True)\
+            .order("posted_at", desc=True)\
             .limit(limit)\
             .execute()
         return response.data

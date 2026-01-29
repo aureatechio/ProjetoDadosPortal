@@ -18,9 +18,11 @@ Aplicar (insere/atualiza em public.social_media_posts):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -34,6 +36,14 @@ try:
 except Exception:  # pragma: no cover
     load_dotenv = None
 
+# Configurações de storage
+DEFAULT_BUCKET = "portal"
+DOWNLOAD_TIMEOUT = 30.0
+IMAGE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+}
+
 
 IG_SCRAPER_ACTOR_ID_DEFAULT = "shu8hvrXbJbY3Eb9W"  # apify/instagram-scraper
 
@@ -41,6 +51,92 @@ IG_SCRAPER_ACTOR_ID_DEFAULT = "shu8hvrXbJbY3Eb9W"  # apify/instagram-scraper
 def ensure_env_loaded(project_root: Path) -> None:
     if load_dotenv is not None:
         load_dotenv(project_root / ".env", override=False)
+
+
+# ============ Funções de Upload para Supabase Storage ============
+
+def _guess_content_type(url: str, response: httpx.Response) -> str:
+    """Determina o content-type da imagem."""
+    ct = (response.headers.get("content-type") or "").split(";")[0].strip().lower()
+    if ct.startswith("image/"):
+        return ct
+    url_lower = url.lower()
+    if ".png" in url_lower:
+        return "image/png"
+    if ".webp" in url_lower:
+        return "image/webp"
+    if ".gif" in url_lower:
+        return "image/gif"
+    return "image/jpeg"
+
+
+def _ext_from_content_type(ct: str) -> str:
+    """Retorna extensão baseada no content-type."""
+    if "png" in ct:
+        return "png"
+    if "webp" in ct:
+        return "webp"
+    if "gif" in ct:
+        return "gif"
+    return "jpg"
+
+
+def _is_already_in_storage(url: str, bucket: str = DEFAULT_BUCKET) -> bool:
+    """Verifica se a URL já aponta para o Supabase Storage."""
+    if not url:
+        return False
+    return f"/storage/v1/object/public/{bucket}/" in url
+
+
+def upload_image_to_storage(
+    supabase: Any,
+    image_url: str,
+    folder: str,
+    filename: str,
+    bucket: str = DEFAULT_BUCKET,
+) -> Optional[str]:
+    """
+    Baixa uma imagem de URL externa e faz upload para o Supabase Storage.
+    """
+    if not image_url:
+        return None
+    
+    if _is_already_in_storage(image_url, bucket):
+        return image_url
+    
+    try:
+        with httpx.Client(timeout=DOWNLOAD_TIMEOUT, follow_redirects=True, headers=IMAGE_HEADERS) as client:
+            response = client.get(image_url)
+        
+        response.raise_for_status()
+        image_data = response.content
+        
+        if not image_data:
+            return image_url
+        
+        content_type = _guess_content_type(image_url, response)
+        ext = _ext_from_content_type(content_type)
+        
+        url_hash = hashlib.md5(image_url.encode()).hexdigest()[:8]
+        safe_filename = f"{filename}_{url_hash}.{ext}"
+        path = f"{folder}/{safe_filename}"
+        
+        with tempfile.NamedTemporaryFile(delete=True, suffix=f".{ext}") as tmp:
+            tmp.write(image_data)
+            tmp.flush()
+            
+            supabase.storage.from_(bucket).upload(
+                path,
+                tmp.name,
+                {"content-type": content_type, "upsert": "true"},
+            )
+        
+        public_url = supabase.storage.from_(bucket).get_public_url(path)
+        return public_url
+        
+    except Exception as e:
+        print(f"[WARN] Erro ao fazer upload de imagem {image_url}: {e}")
+        return image_url
 
 
 def apify_run_sync_get_items(token: str, actor_id: str, actor_input: Dict[str, Any], *, limit: int) -> List[Dict[str, Any]]:
@@ -219,7 +315,25 @@ def summarize_comments_ai(
     return (resp.output_text or "").strip()
 
 
-def to_social_media_post(politico_uuid: str, p: Dict[str, Any], *, actor_id: str) -> Dict[str, Any]:
+def to_social_media_post(
+    politico_uuid: str,
+    p: Dict[str, Any],
+    *,
+    actor_id: str,
+    supabase: Any = None,
+) -> Dict[str, Any]:
+    # Upload do thumbnail para o Supabase Storage se supabase client estiver disponível
+    thumbnail_url = p.get("thumbnail_url")
+    media_url = thumbnail_url
+    if supabase and thumbnail_url:
+        shortcode = p.get("post_shortcode", "")
+        media_url = upload_image_to_storage(
+            supabase=supabase,
+            image_url=thumbnail_url,
+            folder="instagram",
+            filename=f"post_{shortcode}" if shortcode else "post",
+        )
+    
     return {
         "politico_id": politico_uuid,
         "plataforma": "instagram",
@@ -232,7 +346,7 @@ def to_social_media_post(politico_uuid: str, p: Dict[str, Any], *, actor_id: str
         "views": 0,
         "engagement_score": float(p.get("engagement_score") or 0),
         "media_type": p.get("media_type"),
-        "media_url": p.get("thumbnail_url"),
+        "media_url": media_url,
         "posted_at": p.get("posted_at"),
         "comment_summary_ai": None,
         "metadata": {
@@ -389,7 +503,7 @@ def main() -> None:
             for p in top_posts:
                 if not p.get("post_shortcode"):
                     continue
-                row = to_social_media_post(politico_uuid, p, actor_id=args.actor_id)  # Usa UUID para a FK
+                row = to_social_media_post(politico_uuid, p, actor_id=args.actor_id, supabase=supabase)  # Usa UUID para a FK
                 if args.with_comments:
                     sc = p.get("post_shortcode")
                     if sc and sc in comment_summary_by_shortcode:

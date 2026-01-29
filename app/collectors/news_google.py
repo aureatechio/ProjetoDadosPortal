@@ -10,6 +10,7 @@ from newspaper import Article, ArticleException
 import httpx
 
 from app.config import settings
+from app.utils.storage import upload_image_from_url_async
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,15 @@ class GoogleNewsCollector:
         except Exception as e:
             logger.warning(f"Erro inesperado ao extrair artigo {url}: {e}")
             return {}
+
+    async def extrair_conteudo_artigo(self, url: str) -> Dict[str, Any]:
+        """
+        API pública para extração de conteúdo de um artigo.
+
+        O `NewsAggregator` usa este método para enriquecer as notícias finais
+        (ex.: Brasil/estado/capital) com `conteudo_completo`.
+        """
+        return await self._extract_article_content(url)
     
     async def buscar_noticias(
         self, 
@@ -105,7 +115,17 @@ class GoogleNewsCollector:
                     if conteudo.get("conteudo_completo"):
                         noticia["conteudo_completo"] = conteudo["conteudo_completo"]
                     if conteudo.get("imagem_url"):
-                        noticia["imagem_url"] = conteudo["imagem_url"]
+                        # Upload da imagem para o Supabase Storage
+                        imagem_original = conteudo["imagem_url"]
+                        try:
+                            noticia["imagem_url"] = await upload_image_from_url_async(
+                                image_url=imagem_original,
+                                folder="noticias",
+                                fallback_to_original=True
+                            )
+                        except Exception as e:
+                            logger.warning(f"Erro ao fazer upload de imagem de notícia: {e}")
+                            noticia["imagem_url"] = imagem_original
                     if conteudo.get("publicado_em") and not noticia.get("publicado_em"):
                         noticia["publicado_em"] = conteudo["publicado_em"]
                 
