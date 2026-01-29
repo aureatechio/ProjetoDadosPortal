@@ -21,17 +21,47 @@ class NewsAggregator:
     Agrega notícias de múltiplas fontes, remove duplicatas e calcula relevância.
     """
     
-    # Mapeamento de cargo para escopo de notícias
-    ESCOPO_POR_FUNCAO = {
-        'Presidente': {'brasil': True, 'estado': False, 'cidade': False},
-        'Senador': {'brasil': True, 'estado': False, 'cidade': False},
-        'Deputado Federal': {'brasil': True, 'estado': False, 'cidade': False},
-        'Governador': {'brasil': True, 'estado': True, 'cidade': False},
-        'Vice Governador': {'brasil': True, 'estado': True, 'cidade': False},
-        'Deputado Estadual': {'brasil': False, 'estado': True, 'cidade': False},
-        'Prefeito': {'brasil': False, 'estado': True, 'cidade': True},
-        'Vereador': {'brasil': False, 'estado': False, 'cidade': True},
+    # Mapeamento de estados para capitais
+    CAPITAIS_POR_ESTADO = {
+        "AC": "Rio Branco", "AL": "Maceió", "AP": "Macapá", "AM": "Manaus",
+        "BA": "Salvador", "CE": "Fortaleza", "DF": "Brasília", "ES": "Vitória",
+        "GO": "Goiânia", "MA": "São Luís", "MT": "Cuiabá", "MS": "Campo Grande",
+        "MG": "Belo Horizonte", "PA": "Belém", "PB": "João Pessoa", "PR": "Curitiba",
+        "PE": "Recife", "PI": "Teresina", "RJ": "Rio de Janeiro", "RN": "Natal",
+        "RS": "Porto Alegre", "RO": "Porto Velho", "RR": "Boa Vista", "SC": "Florianópolis",
+        "SP": "São Paulo", "SE": "Aracaju", "TO": "Palmas"
     }
+    
+    # Mapeamento de cargo para escopo de notícias
+    # Agora TODOS os cargos coletam notícias da capital (cidade=True para todos)
+    ESCOPO_POR_FUNCAO = {
+        'Presidente': {'brasil': True, 'estado': True, 'cidade': True},
+        'Senador': {'brasil': True, 'estado': True, 'cidade': True},
+        'Deputado Federal': {'brasil': True, 'estado': True, 'cidade': True},
+        'Deputada Federal': {'brasil': True, 'estado': True, 'cidade': True},
+        'Governador': {'brasil': True, 'estado': True, 'cidade': True},
+        'Vice Governador': {'brasil': True, 'estado': True, 'cidade': True},
+        'Deputado Estadual': {'brasil': False, 'estado': True, 'cidade': True},
+        'Deputada Estadual': {'brasil': False, 'estado': True, 'cidade': True},
+        'Prefeito': {'brasil': False, 'estado': True, 'cidade': True},
+        'Prefeita': {'brasil': False, 'estado': True, 'cidade': True},
+        'Vereador': {'brasil': False, 'estado': True, 'cidade': True},
+        'Vereadora': {'brasil': False, 'estado': True, 'cidade': True},
+    }
+    
+    def _get_capital_estado(self, estado: str) -> Optional[str]:
+        """
+        Retorna a capital de um estado.
+        
+        Args:
+            estado: Sigla do estado (ex: SP, RJ)
+            
+        Returns:
+            Nome da capital ou None
+        """
+        if not estado:
+            return None
+        return self.CAPITAIS_POR_ESTADO.get(estado.upper())
     
     def __init__(self):
         self.google_collector = GoogleNewsCollector()
@@ -371,6 +401,11 @@ class NewsAggregator:
                     if not nome:
                         continue
                     
+                    # Se cidade não preenchida, usa a capital do estado
+                    if not cidade and estado:
+                        cidade = self._get_capital_estado(estado)
+                        logger.info(f"Usando capital {cidade} para {nome} ({estado})")
+                    
                     # Determina escopo baseado no cargo
                     escopo = self._get_escopo_noticia(funcao)
                     
@@ -404,7 +439,8 @@ class NewsAggregator:
                             stats["estados"] += inserted
                         estados_processados.add(estado)
                     
-                    # Coleta notícias da cidade (baseado no escopo)
+                    # Coleta notícias da cidade/capital (baseado no escopo)
+                    # Usa a capital do estado se cidade não estiver preenchida
                     if escopo.get("cidade") and cidade and cidade not in cidades_processadas:
                         noticias_cidade = await self.coletar_noticias_cidade(cidade, estado)
                         if noticias_cidade:
