@@ -25,13 +25,21 @@ logger = logging.getLogger(__name__)
 class TrendingCollector:
     """
     Coleta e identifica trending topics políticos baseado em:
-    1. Frequência de termos nas notícias coletadas
-    2. Notícias mais relevantes do Google News
+    1. Google News RSS de política Brasil (fonte primária)
+    2. Frequência de termos nas notícias coletadas
+    3. GNews como fallback
     """
     
     def __init__(self):
         self.gnews = GNews(language="pt", country="BR", max_results=50)
         self.analyzer = ContentAnalyzer()
+        
+        # URLs de RSS do Google News para política
+        self.rss_urls = [
+            "https://news.google.com/rss/search?q=política+brasil+governo&hl=pt-BR&gl=BR&ceid=BR:pt-419",
+            "https://news.google.com/rss/search?q=congresso+câmara+senado&hl=pt-BR&gl=BR&ceid=BR:pt-419",
+            "https://news.google.com/rss/search?q=lula+bolsonaro+eleição&hl=pt-BR&gl=BR&ceid=BR:pt-419",
+        ]
         
         # Palavras a ignorar (stop words políticas)
         self.stop_words = {
@@ -47,7 +55,8 @@ class TrendingCollector:
             'após', 'antes', 'durante', 'até', 'desde',
             'ano', 'anos', 'dia', 'dias', 'vez', 'vezes',
             'novo', 'nova', 'novos', 'novas',
-            'brasil', 'brasileiro', 'brasileira', 'país'
+            'brasil', 'brasileiro', 'brasileira', 'país',
+            'google', 'notícias', 'news', 'fonte', 'jornal'
         }
         
         # Termos políticos importantes para destacar
@@ -60,7 +69,8 @@ class TrendingCollector:
             'ministro', 'ministério', 'secretário', 'secretaria',
             'stf', 'tse', 'trf', 'mpf', 'pgr',
             'orçamento', 'fiscal', 'inflação', 'economia',
-            'saúde', 'educação', 'segurança', 'meio ambiente'
+            'saúde', 'educação', 'segurança', 'meio ambiente',
+            'lula', 'bolsonaro', 'tarcísio', 'congresso', 'câmara', 'senado'
         }
     
     def _extract_relevant_terms(self, text: str) -> List[str]:
@@ -116,8 +126,72 @@ class TrendingCollector:
         
         return entities
     
+    async def _fetch_political_news_rss(self) -> List[Dict[str, Any]]:
+        """
+        Busca notícias políticas via Google News RSS (fonte mais confiável).
+        """
+        try:
+            import httpx
+            from xml.etree import ElementTree
+        except ImportError:
+            logger.warning("httpx não disponível para RSS de política")
+            return []
+        
+        todas_noticias = []
+        
+        for rss_url in self.rss_urls:
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.get(
+                        rss_url,
+                        headers={
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                        }
+                    )
+                    response.raise_for_status()
+                    
+                    # Parse XML
+                    root = ElementTree.fromstring(response.text)
+                    items = root.findall('.//item')
+                    
+                    for item in items:
+                        title_elem = item.find('title')
+                        source_elem = item.find('source')
+                        
+                        if title_elem is not None and title_elem.text:
+                            noticia = {
+                                "title": title_elem.text.strip(),
+                                "description": title_elem.text.strip(),
+                                "publisher": {
+                                    "title": source_elem.text if source_elem is not None else "Google News"
+                                }
+                            }
+                            todas_noticias.append(noticia)
+                
+                await asyncio.sleep(0.5)
+                
+            except Exception as e:
+                logger.warning(f"Erro ao buscar RSS de política: {e}")
+        
+        if todas_noticias:
+            logger.info(f"Coletadas {len(todas_noticias)} notícias de política via RSS")
+        
+        return todas_noticias
+    
     async def _fetch_political_news(self) -> List[Dict[str, Any]]:
-        """Busca notícias políticas recentes"""
+        """
+        Busca notícias políticas recentes.
+        Usa RSS do Google News como fonte primária, GNews como fallback.
+        """
+        # Tenta RSS primeiro (mais confiável)
+        noticias = await self._fetch_political_news_rss()
+        
+        if noticias:
+            return noticias
+        
+        # Fallback para GNews
+        logger.info("RSS falhou, usando GNews como fallback para política")
+        
         queries = [
             "política Brasil hoje",
             "Congresso Nacional",
