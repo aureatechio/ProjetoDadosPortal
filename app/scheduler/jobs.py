@@ -385,8 +385,8 @@ def start_scheduler():
     Horários distribuídos para economizar carga do servidor:
     - 06:00 - Notícias (manhã cedo)
     - 09:00 - Instagram (manhã)
+    - 09:30 - Trending Topics (manhã)
     - 12:00 - Menções Sociais (meio-dia)
-    - 15:00 - Trending Topics (tarde)
     - 03:00 - Limpeza (madrugada)
     - Domingo 03:30 - TSE Processual (semanal)
     """
@@ -420,10 +420,10 @@ def start_scheduler():
         replace_existing=True
     )
     
-    # Job de trending - 15:00 (tarde)
+    # Job de trending - 09:30 (manhã)
     scheduler.add_job(
         job_coleta_trending,
-        CronTrigger(hour=15, minute=0),
+        CronTrigger(hour=9, minute=30),
         id="coleta_trending",
         name="Coleta Trending Topics",
         replace_existing=True
