@@ -381,66 +381,67 @@ async def executar_coleta_manual(tipo: str = "completa", dry_run: bool = False) 
 def start_scheduler():
     """
     Inicia o scheduler com os jobs configurados.
-    """
-    # Parse horário de coleta do config
-    hora, minuto = settings.coleta_horario.split(":")
-    hora = int(hora)
-    minuto = int(minuto)
     
+    Horários distribuídos para economizar carga do servidor:
+    - 06:00 - Notícias (manhã cedo)
+    - 09:00 - Instagram (manhã)
+    - 12:00 - Menções Sociais (meio-dia)
+    - 15:00 - Trending Topics (tarde)
+    - 03:00 - Limpeza (madrugada)
+    - Domingo 03:30 - TSE Processual (semanal)
+    """
     # Adiciona listener para eventos
     scheduler.add_listener(job_listener, EVENT_JOB_ERROR | EVENT_JOB_EXECUTED)
     
-    # Job de coleta de notícias - 06:00 (ou horário configurado)
+    # Job de coleta de notícias - 06:00 (manhã cedo)
     scheduler.add_job(
         job_coleta_noticias,
-        CronTrigger(hour=hora, minute=minuto),
+        CronTrigger(hour=6, minute=0),
         id="coleta_noticias",
         name="Coleta de Notícias",
         replace_existing=True
     )
     
-    # Job de coleta do Instagram - 45 minutos depois
+    # Job de coleta do Instagram - 09:00 (3h depois das notícias)
     scheduler.add_job(
         job_coleta_instagram,
-        CronTrigger(hour=hora, minute=minuto + 45 if minuto + 45 < 60 else (minuto + 45) % 60),
+        CronTrigger(hour=9, minute=0),
         id="coleta_instagram",
         name="Coleta Instagram",
         replace_existing=True
     )
     
-    # Job de menções sociais - 1 hora depois das notícias
-    hora_social = hora + 1 if hora + 1 < 24 else (hora + 1) % 24
+    # Job de menções sociais - 12:00 (meio-dia)
     scheduler.add_job(
         job_coleta_social_mentions,
-        CronTrigger(hour=hora_social, minute=minuto),
+        CronTrigger(hour=12, minute=0),
         id="coleta_social_mentions",
         name="Coleta Menções Sociais",
         replace_existing=True
     )
     
-    # Job de trending - 2 horas depois
-    hora_trending = hora + 2 if hora + 2 < 24 else (hora + 2) % 24
+    # Job de trending - 15:00 (tarde)
     scheduler.add_job(
         job_coleta_trending,
-        CronTrigger(hour=hora_trending, minute=minuto),
+        CronTrigger(hour=15, minute=0),
         id="coleta_trending",
         name="Coleta Trending Topics",
         replace_existing=True
     )
     
-    # Job de limpeza - 2h15 depois
+    # Job de limpeza - 03:00 (madrugada, baixa carga)
     scheduler.add_job(
         job_limpeza,
-        CronTrigger(hour=hora_trending, minute=minuto + 15 if minuto + 15 < 60 else (minuto + 15) % 60),
+        CronTrigger(hour=3, minute=0),
         id="limpeza_dados",
         name="Limpeza de Dados Antigos",
         replace_existing=True
     )
     
-    # Job de coleta processual TSE - Semanal (domingo às 03:00)
+    # Job de coleta processual TSE - Semanal (domingo às 03:30)
     scheduler.add_job(
         job_coleta_processual_tse,
-        CronTrigger(day_of_week="sun", hour=3, minute=0),
+        CronTrigger(day_of_week="sun", hour=3, minute=30),
         id="coleta_processual_tse",
         name="Coleta Processual TSE (Semanal)",
         replace_existing=True

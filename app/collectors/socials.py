@@ -78,13 +78,15 @@ class SocialsCollector:
         mapping_file = Path(mapping_path) if mapping_path else self._mapping_path
         fonte_ids = self._load_mapping(mapping_file)
 
-        politicos = db.get_politicos_ativos()
-        total_ativos = len(politicos)
+        # Obtém políticos com usar_diretoriaja = True
+        politicos = db.get_politicos_diretoriaja()
+        total_diretoriaja = len(politicos)
+        logger.info(f"Preenchendo redes sociais para {total_diretoriaja} políticos (usar_diretoriaja=True)")
 
         stats = {
             "status": "ok",
             "dry_run": dry_run,
-            "politicos_ativos": total_ativos,
+            "politicos_diretoriaja": total_diretoriaja,
             "politicos_com_mapeamento": 0,
             "consultas_wikidata": 0,
             "atualizacoes_planejadas": 0,

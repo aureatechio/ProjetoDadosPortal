@@ -239,7 +239,9 @@ class InstagramCollector:
         }
         
         try:
-            politicos = db.get_politicos_ativos()
+            # Obtém políticos com usar_diretoriaja = True
+            politicos = db.get_politicos_diretoriaja()
+            logger.info(f"Coletando Instagram para {len(politicos)} políticos (usar_diretoriaja=True)")
             
             for politico in politicos:
                 instagram_username = politico.get("instagram_username")

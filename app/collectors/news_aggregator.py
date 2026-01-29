@@ -539,9 +539,9 @@ class NewsAggregator:
         }
         
         try:
-            # Obtém todos os políticos ativos
-            politicos = db.get_politicos_ativos()
-            logger.info(f"Iniciando coleta para {len(politicos)} políticos")
+            # Obtém políticos com usar_diretoriaja = True
+            politicos = db.get_politicos_diretoriaja()
+            logger.info(f"Iniciando coleta para {len(politicos)} políticos (usar_diretoriaja=True)")
             
             cidades_processadas = set()
             estados_processados = set()
