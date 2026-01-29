@@ -19,8 +19,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 
 # Instala dependências Python
+# Cache bust: 2024-01-29 - adicionado lxml_html_clean
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir lxml_html_clean
 
 # Copia código da aplicação
 COPY app/ ./app/
