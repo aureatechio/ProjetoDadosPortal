@@ -1,12 +1,18 @@
 import type { InstagramPost } from '../types'
 
 // URL base da API
-const API_BASE = 'http://localhost:8000'
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
 // Função para gerar URL do proxy de imagem
 function getProxyImageUrl(originalUrl: string | null | undefined): string | null {
   if (!originalUrl) return null
   return `${API_BASE}/proxy/image?url=${encodeURIComponent(originalUrl)}`
+}
+
+function isSupabaseStoragePublicUrl(url: string | null | undefined): boolean {
+  if (!url) return false
+  // Ex: https://xxx.supabase.co/storage/v1/object/public/portal/...
+  return url.includes('.supabase.co/storage/v1/object/public/')
 }
 
 // Formatar números grandes
@@ -21,8 +27,11 @@ export function InstagramCard({ post }: { post: InstagramPost }) {
   const score = typeof post.engagement_score === 'number' ? post.engagement_score : null
   // Usa media_url primeiro, depois thumbnail_url como fallback
   const originalImageUrl = post.media_url || post.thumbnail_url
-  // URL do proxy para contornar proteção de hotlinking
-  const imageUrl = getProxyImageUrl(originalImageUrl)
+  // Se já estiver no Supabase Storage (URL pública), carrega direto.
+  // Se for URL externa (CDN do Instagram), usa proxy (quando configurado) para contornar hotlinking/CORS.
+  const imageUrl = isSupabaseStoragePublicUrl(originalImageUrl)
+    ? originalImageUrl
+    : getProxyImageUrl(originalImageUrl)
   // Monta a URL do post
   const postUrl = post.post_url || (post.post_shortcode ? `https://www.instagram.com/p/${post.post_shortcode}/` : null)
   // Texto do post (caption ou conteudo)
